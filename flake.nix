@@ -39,7 +39,7 @@
       '';
     };
   in
-  {
+  rec {
     nixosConfigurations = {
       installerIso = nixpkgs.lib.nixosSystem {
         specialArgs = { inherit inputs nixosWizard; };
@@ -48,6 +48,8 @@
         ];
       };
     };
+
+    isoImage = nixosConfigurations.installerIso.config.system.build.isoImage;
 
     packages.${system} = {
       default = nixosWizard;

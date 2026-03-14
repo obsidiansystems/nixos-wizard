@@ -137,7 +137,7 @@ impl Installer {
       "kernels": self.kernels
     });
 
-    // drive configuration — collect disko configs from all configured drives
+    // drive configuration - collect disko configs from all configured drives
     let disko_cfgs: Vec<serde_json::Value> = self
       .disk_config
       .disks_mut()

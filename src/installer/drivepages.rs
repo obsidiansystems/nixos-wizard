@@ -1233,7 +1233,7 @@ impl Page for ManualPartition {
               Signal::Push(Box::new(SuggestPartition::new()))
             }
             1 => {
-              // Confirm and Exit — save and pop back to SelectDrive
+              // Confirm and Exit - save and pop back to SelectDrive
               Signal::Pop
             }
             2 => {
