@@ -2,15 +2,17 @@
   description = "Nixos TUI Installer";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko/latest";
     disko.inputs.nixpkgs.follows = "nixpkgs";
     nixos-hardware.url = "github:NixOS/nixos-hardware/master";
+    gather-linux.url = "github:simonkoeck/gather-linux";
+    gather-linux.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, fenix, disko, nixos-hardware, ... }@inputs:
+  outputs = { self, nixpkgs, fenix, disko, nixos-hardware, gather-linux, ... }@inputs:
   let
     system = "x86_64-linux";
     mkRustToolchain = fenix.packages.${system}.complete.withComponents;

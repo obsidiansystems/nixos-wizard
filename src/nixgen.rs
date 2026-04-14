@@ -85,6 +85,7 @@ pub fn highlight_nix(nix: &str) -> anyhow::Result<String> {
 #[derive(Debug)]
 pub struct Configs {
   pub system: String,             // configuration.nix
+  pub extras: String,             // extras.nix
   pub disko: String,              // disko.nix
   pub flake_nix: String,          // flake.nix
   pub flake_lock: String,         // flake.lock
@@ -128,7 +129,7 @@ impl NixWriter {
   pub fn new(config: Value) -> Self {
     Self { config }
   }
-  /// Generate all configuration files: flake.nix, flake.lock, configuration.nix, disko.nix
+  /// Generate all configuration files: flake.nix, flake.lock, configuration.nix, extras.nix, disko.nix
   pub fn write_configs(&self) -> anyhow::Result<Configs> {
     let disko = {
       let config = self.config["disko"].clone();
@@ -139,6 +140,8 @@ impl NixWriter {
       let config = self.config["config"].clone();
       self.write_sys_config(config)?
     };
+
+    let extras = self.write_extras_config()?;
 
     let hostname = self.config["config"]["hostname"]
       .as_str()
@@ -152,6 +155,7 @@ impl NixWriter {
 
     Ok(Configs {
       system: sys_cfg,
+      extras,
       disko,
       flake_nix,
       flake_lock,
@@ -173,11 +177,15 @@ impl NixWriter {
       .then(|| parse_input_lock("nixos-hardware"))
       .flatten();
 
+    let gather_lock = parse_input_lock("gather-linux");
+
     // Build flake inputs
     let mut input_lines = vec![
       r#"    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";"#.to_string(),
       r#"    disko.url = "github:nix-community/disko/latest";"#.to_string(),
       r#"    disko.inputs.nixpkgs.follows = "nixpkgs";"#.to_string(),
+      r#"    gather-linux.url = "github:simonkoeck/gather-linux";"#.to_string(),
+      r#"    gather-linux.inputs.nixpkgs.follows = "nixpkgs";"#.to_string(),
     ];
     if hardware_module.is_some() {
       input_lines.push(r#"    nixos-hardware.url = "github:NixOS/nixos-hardware/master";"#.to_string());
@@ -189,6 +197,7 @@ impl NixWriter {
       "          disko.nixosModules.disko".to_string(),
       "          ./configuration.nix".to_string(),
       "          ./disko.nix".to_string(),
+      "          ./extras.nix".to_string(),
     ];
     if let Some(hw_mod) = hardware_module {
       module_lines.push(format!("          nixos-hardware.nixosModules.{hw_mod}"));
@@ -196,7 +205,7 @@ impl NixWriter {
     let modules = module_lines.join("\n");
 
     // Build output args
-    let mut output_args = vec!["nixpkgs", "disko"];
+    let mut output_args = vec!["nixpkgs", "disko", "gather-linux"];
     if hardware_module.is_some() {
       output_args.push("nixos-hardware");
     }
@@ -212,6 +221,7 @@ impl NixWriter {
 
   outputs = {{ {output_args_str}, ... }}: {{
     nixosConfigurations.{hostname} = nixpkgs.lib.nixosSystem {{
+      specialArgs = {{ inherit gather-linux; }};
       modules = [
 {modules}
       ];
@@ -260,10 +270,76 @@ impl NixWriter {
       "root": {
         "inputs": {
           "disko": "disko",
+          "gather-linux": "gather-linux",
           "nixpkgs": "nixpkgs"
         }
       }
     });
+
+    // Add gather-linux and its transitive dependencies (flake-utils, systems)
+    if let Some(gather) = gather_lock {
+      let flake_utils_lock = parse_input_lock("flake-utils");
+      let systems_lock = parse_input_lock("systems");
+
+      lock_nodes["gather-linux"] = serde_json::json!({
+        "inputs": {
+          "flake-utils": "flake-utils",
+          "nixpkgs": ["nixpkgs"]
+        },
+        "locked": {
+          "lastModified": gather.last_modified,
+          "narHash": gather.nar_hash,
+          "owner": gather.owner,
+          "repo": gather.repo,
+          "rev": gather.rev,
+          "type": "github"
+        },
+        "original": {
+          "owner": "simonkoeck",
+          "repo": "gather-linux",
+          "type": "github"
+        }
+      });
+
+      if let Some(fu) = flake_utils_lock {
+        lock_nodes["flake-utils"] = serde_json::json!({
+          "inputs": {
+            "systems": "systems"
+          },
+          "locked": {
+            "lastModified": fu.last_modified,
+            "narHash": fu.nar_hash,
+            "owner": fu.owner,
+            "repo": fu.repo,
+            "rev": fu.rev,
+            "type": "github"
+          },
+          "original": {
+            "owner": "numtide",
+            "repo": "flake-utils",
+            "type": "github"
+          }
+        });
+      }
+
+      if let Some(sys) = systems_lock {
+        lock_nodes["systems"] = serde_json::json!({
+          "locked": {
+            "lastModified": sys.last_modified,
+            "narHash": sys.nar_hash,
+            "owner": sys.owner,
+            "repo": sys.repo,
+            "rev": sys.rev,
+            "type": "github"
+          },
+          "original": {
+            "owner": "nix-systems",
+            "repo": "default",
+            "type": "github"
+          }
+        });
+      }
+    }
 
     if let Some(hw) = hw_lock {
       lock_nodes["nixos-hardware"] = serde_json::json!({
@@ -366,14 +442,6 @@ impl NixWriter {
       }
     }
 
-    // If hardware module detected, enable fwupd
-    if cfg.get("hardware_module").and_then(|v| v.as_str()).is_some() {
-      let fwupd = attrset! {
-        "services.fwupd.enable" = true;
-      };
-      cfg_attrs = merge_attrs!(cfg_attrs, fwupd);
-    }
-
     // Build imports list — hardware-configuration.nix for kernel modules etc,
     // but filesystem entries come from disko (generated with --no-filesystems)
     let mut import_entries = vec!["./hardware-configuration.nix".to_string()];
@@ -391,6 +459,9 @@ impl NixWriter {
     let zfs_boot = attrset! {
       "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
       "boot.zfs.extraPools" = r#"[ "tank" ]"#;
+      "boot.zfs.forceImportAll" = true;
+      "boot.zfs.devNodes" = nixstr("/dev/disk/by-id");
+      "boot.zfs.requestEncryptionCredentials" = r#"[ "tank" ]"#;
     };
 
     cfg_attrs = merge_attrs!(imports, cfg_attrs, state_version, zfs_boot);
@@ -420,6 +491,60 @@ impl NixWriter {
     // Format the generated Nix code for readability
     fmt_nix(raw)
   }
+
+  /// Generate extras.nix — bundled opinionated defaults separate from user choices
+  ///
+  /// Contains: fwupd, welcome script, Firefox policies, Gather package
+  fn write_extras_config(&self) -> anyhow::Result<String> {
+    let raw = r#"
+      # extras.nix — opinionated defaults bundled by nixos-wizard.
+      # These are not user choices — edit or remove as you see fit.
+      { config, pkgs, gather-linux, ... }: {
+
+        # Firmware update daemon
+        services.fwupd.enable = true;
+
+        # Gather (flake input, not in nixpkgs)
+        environment.systemPackages = [
+          gather-linux.packages.${pkgs.system}.default
+        ];
+
+        # Suppress Firefox first-run pages
+        programs.firefox = {
+          enable = true;
+          policies = {
+            DisableProfileImport = true;
+            OverrideFirstRunPage = "";
+            OverridePostUpdatePage = "";
+          };
+        };
+
+        # First-login welcome script: opens default apps once, then disables itself
+        # via a sentinel file so it only runs on the user's very first login.
+        # Remove ~/.config/nixos-welcome-done to re-trigger.
+        environment.etc."xdg/autostart/welcome.desktop".text = ''
+          [Desktop Entry]
+          Type=Application
+          Name=Welcome
+          Exec=/etc/nixos-welcome.sh
+          X-GNOME-Autostart-enabled=true
+        '';
+        environment.etc."nixos-welcome.sh".mode = "0755";
+        environment.etc."nixos-welcome.sh".text = ''
+          #!/bin/sh
+          FLAG="$HOME/.config/nixos-welcome-done"
+          [ -f "$FLAG" ] && exit 0
+          mkdir -p "$(dirname "$FLAG")"
+          firefox https://mail.google.com &
+          slack &
+          gather-linux &
+          touch "$FLAG"
+        '';
+      }
+    "#;
+    fmt_nix(raw.to_string())
+  }
+
   /// Generate Disko configuration for disk partitioning
   ///
   /// Converts the disk layout into Disko's declarative partition format
@@ -783,7 +908,7 @@ impl NixWriter {
     match value.to_lowercase().as_str() {
       "gnome" => attrset! {
         "services.xserver.enable" = true;
-        "services.xserver.desktopManager.gnome.enable" = true;
+        "services.desktopManager.gnome.enable" = true;
       },
       "hyprland" => attrset! {
         "programs.hyprland.enable" = true;

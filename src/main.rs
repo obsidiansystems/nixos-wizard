@@ -196,11 +196,13 @@ fn handle_signal(
 
           // Create temporary files to hold the generated configurations
           let mut system_cfg = NamedTempFile::new()?;
+          let mut extras_cfg = NamedTempFile::new()?;
           let mut disko_cfg = NamedTempFile::new()?;
           let mut flake_nix = NamedTempFile::new()?;
           let mut flake_lock = NamedTempFile::new()?;
 
           write!(system_cfg, "{}", cfg.system)?;
+          write!(extras_cfg, "{}", cfg.extras)?;
           write!(disko_cfg, "{}", cfg.disko)?;
           write!(flake_nix, "{}", cfg.flake_nix)?;
           write!(flake_lock, "{}", cfg.flake_lock)?;
@@ -209,6 +211,7 @@ fn handle_signal(
           page_stack.push(Box::new(InstallProgress::new(
             installer.clone(),
             system_cfg,
+            extras_cfg,
             disko_cfg,
             flake_nix,
             flake_lock,

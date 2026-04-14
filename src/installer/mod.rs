@@ -102,8 +102,12 @@ pub struct Installer {
   /// 8-character hex string for networking.hostId (required by ZFS)
   pub host_id: String,
 
-  /// Detected nixos-hardware module path (e.g. "framework/13-inch/amd-ai-300-series")
+  /// Detected nixos-hardware module path (e.g. "framework-amd-ai-300-series")
   pub hardware_module: Option<String>,
+
+  /// Plaintext disk encryption password (never written to nix store)
+  #[serde(skip)]
+  pub encryption_password: Option<String>,
 }
 
 impl Installer {
@@ -166,6 +170,7 @@ impl Installer {
       && !self.users.is_empty()
       && !self.disk_config.is_empty()
       && self.bootloader.is_some()
+      && self.encryption_password.is_some()
   }
 
   pub fn to_json(&mut self) -> anyhow::Result<serde_json::Value> {
@@ -197,10 +202,24 @@ impl Installer {
     });
 
     // drive configuration — collect disko configs from all configured drives
+    let encrypted = self.encryption_password.is_some();
     let disko_cfgs: Vec<serde_json::Value> = self
       .disk_config
       .disks_mut()
-      .map(|d| d.as_disko_cfg())
+      .map(|d| {
+        let mut cfg = d.as_disko_cfg();
+        // Add ZFS native encryption options to the zpool if password is set
+        if encrypted {
+          if let Some(zpool) = cfg.get_mut("zpool") {
+            if let Some(opts) = zpool.get_mut("rootFsOptions") {
+              opts["encryption"] = serde_json::json!("aes-256-gcm");
+              opts["keyformat"] = serde_json::json!("passphrase");
+              opts["keylocation"] = serde_json::json!("file:///tmp/disk.key");
+            }
+          }
+        }
+        cfg
+      })
       .collect();
 
     // flake configuration if using flakes
@@ -273,6 +292,7 @@ pub enum MenuPages {
   KeyboardLayout,
   Locale,
   EnableFlakes,
+  DiskEncryption,
   Drives,
   Bootloader,
   Swap,
@@ -318,6 +338,7 @@ impl MenuPages {
       MenuPages::KeyboardLayout,
       MenuPages::Locale,
       MenuPages::Timezone,
+      MenuPages::DiskEncryption,
       MenuPages::Drives,
       MenuPages::RootPassword,
       MenuPages::UserAccounts,
@@ -333,6 +354,7 @@ impl Display for MenuPages {
       MenuPages::KeyboardLayout => "Keyboard Layout",
       MenuPages::Locale => "Locale",
       MenuPages::EnableFlakes => "Enable Flakes",
+      MenuPages::DiskEncryption => "Disk Encryption",
       MenuPages::Drives => "Drives",
       MenuPages::Bootloader => "Bootloader",
       MenuPages::Swap => "Swap",
@@ -361,6 +383,7 @@ impl MenuPages {
       MenuPages::KeyboardLayout => KeyboardLayout::display_widget(installer),
       MenuPages::Locale => Locale::display_widget(installer),
       MenuPages::EnableFlakes => EnableFlakes::display_widget(installer),
+      MenuPages::DiskEncryption => DiskEncryption::display_widget(installer),
       MenuPages::Drives => {
         if installer.disk_config.is_empty() {
           None
@@ -392,6 +415,7 @@ impl MenuPages {
       MenuPages::KeyboardLayout => KeyboardLayout::page_info(),
       MenuPages::Locale => Locale::page_info(),
       MenuPages::EnableFlakes => EnableFlakes::page_info(),
+      MenuPages::DiskEncryption => DiskEncryption::page_info(),
       MenuPages::Drives => (
         "Drives".to_string(),
         styled_block(vec![
@@ -433,6 +457,7 @@ impl MenuPages {
       MenuPages::KeyboardLayout => Signal::Push(Box::new(KeyboardLayout::new())),
       MenuPages::Locale => Signal::Push(Box::new(Locale::new())),
       MenuPages::EnableFlakes => Signal::Push(Box::new(EnableFlakes::new(installer.enable_flakes))),
+      MenuPages::DiskEncryption => Signal::Push(Box::new(DiskEncryption::new())),
       MenuPages::Drives => Signal::Push(Box::new(Drives::new())),
       MenuPages::Bootloader => Signal::Push(Box::new(Bootloader::new())),
       MenuPages::Swap => Signal::Push(Box::new(Swap::new(installer.use_swap))),
@@ -2305,6 +2330,207 @@ impl Page for Hostname {
         Signal::Pop
       }
       _ => self.input.handle_input(event),
+    }
+  }
+}
+
+pub struct DiskEncryption {
+  input: LineEditor,
+  confirm: LineEditor,
+  help_modal: HelpModal<'static>,
+}
+
+impl DiskEncryption {
+  pub fn new() -> Self {
+    let mut input =
+      LineEditor::new("Encryption Password", Some("Password will be hidden")).secret(true);
+    let confirm =
+      LineEditor::new("Confirm Password", Some("Password will be hidden")).secret(true);
+    input.focus();
+    let help_content = styled_block(vec![
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+        (None, " - Move to next field or save when complete"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Tab"),
+        (None, " - Switch between password fields"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+        (None, " - Cancel and return to menu"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (None, " - Show this help"),
+      ],
+    ]);
+    let help_modal = HelpModal::new("Disk Encryption", help_content);
+    Self {
+      input,
+      confirm,
+      help_modal,
+    }
+  }
+
+  pub fn page_info<'a>() -> (String, Vec<Line<'a>>) {
+    (
+      "Disk Encryption".to_string(),
+      styled_block(vec![
+        vec![(
+          None,
+          "Your ZFS pool will be encrypted with native ZFS encryption (aes-256-gcm).",
+        )],
+        vec![(
+          None,
+          "You will be prompted for this password each time the system boots.",
+        )],
+        vec![(
+          None,
+          "Choose a strong password. If you lose it, your data cannot be recovered.",
+        )],
+      ]),
+    )
+  }
+
+  pub fn display_widget(installer: &mut Installer) -> Option<Box<dyn ConfigWidget>> {
+    installer.encryption_password.as_ref().map(|_| {
+      let ib = InfoBox::new(
+        "",
+        styled_block(vec![vec![(HIGHLIGHT, "Encryption password is set.")]]),
+      );
+      Box::new(ib) as Box<dyn ConfigWidget>
+    })
+  }
+}
+
+impl Default for DiskEncryption {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl Page for DiskEncryption {
+  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
+    let chunks = split_vert!(
+      area,
+      1,
+      [
+        Constraint::Percentage(40),
+        Constraint::Length(12),
+        Constraint::Percentage(40),
+      ]
+    );
+    let hor_chunks = split_hor!(
+      chunks[1],
+      1,
+      [
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+      ]
+    );
+    let vert_chunks = split_vert!(
+      hor_chunks[1],
+      0,
+      [Constraint::Length(5), Constraint::Length(5)]
+    );
+
+    let info_box = InfoBox::new(
+      "",
+      styled_block(vec![
+        vec![(
+          None,
+          "Your ZFS pool will be encrypted with native ZFS encryption (aes-256-gcm).",
+        )],
+        vec![(
+          None,
+          "You will be prompted for this password on every boot.",
+        )],
+        vec![(
+          None,
+          "If you lose this password, your data cannot be recovered.",
+        )],
+      ]),
+    );
+
+    info_box.render(f, chunks[0]);
+    self.input.render(f, vert_chunks[0]);
+    self.confirm.render(f, vert_chunks[1]);
+    self.help_modal.render(f, area);
+  }
+
+  fn get_help_content(&self) -> (String, Vec<Line<'_>>) {
+    Self::page_info()
+  }
+
+  fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
+    match event.code {
+      KeyCode::Char('?') => {
+        self.help_modal.toggle();
+        Signal::Wait
+      }
+      ui_close!() if self.help_modal.visible => {
+        self.help_modal.hide();
+        Signal::Wait
+      }
+      _ if self.help_modal.visible => Signal::Wait,
+      KeyCode::Esc => Signal::Pop,
+      KeyCode::Tab => {
+        if self.input.is_focused() {
+          self.input.unfocus();
+          self.confirm.focus();
+        } else {
+          self.confirm.unfocus();
+          self.input.focus();
+        }
+        Signal::Wait
+      }
+      KeyCode::Enter => {
+        if self.input.is_focused() {
+          self.input.unfocus();
+          self.confirm.focus();
+          Signal::Wait
+        } else {
+          let passwd = self
+            .input
+            .get_value()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .trim()
+            .to_string();
+          let confirm = self
+            .confirm
+            .get_value()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .trim()
+            .to_string();
+          if passwd.is_empty() {
+            Signal::Wait
+          } else if passwd != confirm {
+            self.input.clear();
+            self.confirm.clear();
+            self.confirm.unfocus();
+            self.input.focus();
+            self.input.error("Passwords do not match");
+            Signal::Wait
+          } else {
+            installer.encryption_password = Some(passwd);
+            Signal::Pop
+          }
+        }
+      }
+      _ => {
+        if self.input.is_focused() {
+          self.input.handle_input(event);
+        } else {
+          self.confirm.handle_input(event);
+        }
+        Signal::Wait
+      }
     }
   }
 }
@@ -4498,6 +4724,7 @@ pub struct InstallProgress<'a> {
 
   // we only hold onto these to keep them alive during installation
   _system_cfg: NamedTempFile,
+  _extras_cfg: NamedTempFile,
   _disko_cfg: NamedTempFile,
   _flake_nix: NamedTempFile,
   _flake_lock: NamedTempFile,
@@ -4508,6 +4735,7 @@ impl<'a> InstallProgress<'a> {
   pub fn new(
     installer: Installer,
     system_cfg: NamedTempFile,
+    extras_cfg: NamedTempFile,
     disko_cfg: NamedTempFile,
     flake_nix: NamedTempFile,
     flake_lock: NamedTempFile,
@@ -4528,6 +4756,11 @@ impl<'a> InstallProgress<'a> {
       .to_str()
       .ok_or_else(|| anyhow::anyhow!("Invalid flake.lock path"))?
       .to_string();
+    let extras_cfg_path = extras_cfg
+      .path()
+      .to_str()
+      .ok_or_else(|| anyhow::anyhow!("Invalid extras config path"))?
+      .to_string();
     let install_steps = Self::install_commands(
       &installer,
       system_cfg
@@ -4535,6 +4768,7 @@ impl<'a> InstallProgress<'a> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid system config path"))?
         .to_string(),
+      extras_cfg_path,
       disko_cfg
         .path()
         .to_str()
@@ -4583,6 +4817,7 @@ impl<'a> InstallProgress<'a> {
       help_modal,
       signal: None,
       _system_cfg: system_cfg,
+      _extras_cfg: extras_cfg,
       _disko_cfg: disko_cfg,
       _flake_nix: flake_nix,
       _flake_lock: flake_lock,
@@ -4602,6 +4837,7 @@ impl<'a> InstallProgress<'a> {
   fn install_commands(
     installer: &Installer,
     system_cfg_path: String,
+    extras_cfg_path: String,
     disk_cfg_path: String,
     flake_nix_path: String,
     flake_lock_path: String,
@@ -4639,45 +4875,71 @@ impl<'a> InstallProgress<'a> {
     }
 
     let hostname = installer.hostname.as_deref().unwrap_or("laptop");
-    let host_id = &installer.host_id;
+    let has_encryption = installer.encryption_password.is_some();
 
-    Ok(vec![
+    // Write encryption password to temp file for disko (if set)
+    if let Some(ref password) = installer.encryption_password {
+      std::fs::write("/tmp/disk.key", password)?;
+    }
+
+    let mut steps = Vec::new();
+
+    steps.push(
 			(Line::from("Configuring disk layout..."),
 			vec![
 			command!("sh", "-c", format!("echo Partitioning disks... &> {log_file_path}")),
 			command!("sh", "-c", format!("disko --yes-wipe-all-disks --mode destroy,format,mount {disk_cfg_path} &>> {log_file_path}")),
-			].into()),
+			].into()));
+    // After disko runs, delete the key file and switch keylocation to prompt for boot
+    if has_encryption {
+      steps.push(
+			(Line::from("Securing encryption key..."),
+			vec![
+			command!("sh", "-c", format!("echo Removing temporary key file... &> {log_file_path}")),
+			command!("sh", "-c", format!("rm -f /tmp/disk.key && echo Key file removed. &>> {log_file_path}")),
+			command!("sh", "-c", format!("zfs set keylocation=prompt tank &>> {log_file_path}")),
+			].into()));
+    }
+
+    steps.push(
 			(Line::from("Generating hardware config..."),
 			vec![
 			command!("sh", "-c", format!("echo Generating hardware configuration... &> {log_file_path}")),
 			command!("sh", "-c", format!("nixos-generate-config --no-filesystems --root /mnt &>> {log_file_path}")),
-			].into()),
+			].into()));
+    steps.push(
 			(Line::from("Writing NixOS configuration..."),
 			vec![
 			command!("sh", "-c", format!("echo Writing configuration files... &> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {system_cfg_path} /mnt/etc/nixos/configuration.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("cp -v {extras_cfg_path} /mnt/etc/nixos/extras.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {disk_cfg_path} /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("sed -i 's|file:///tmp/disk.key|prompt|g' /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {flake_nix_path} /mnt/etc/nixos/flake.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {flake_lock_path} /mnt/etc/nixos/flake.lock &>> {log_file_path}")),
-			].into()),
+			].into()));
+    steps.push(
 			(Line::from("Initializing git repo..."),
 			vec![
 			command!("sh", "-c", format!("echo Initializing git repo... &>> {log_file_path}")),
-			command!("sh", "-c", format!("cd /mnt/etc/nixos && git init &>> {log_file_path}")),
+			command!("sh", "-c", format!("cd /mnt/etc/nixos && git init -b main &>> {log_file_path}")),
 			command!("sh", "-c", format!("cd /mnt/etc/nixos && git add -A &>> {log_file_path}")),
 			command!("sh", "-c", format!("cd /mnt/etc/nixos && GIT_COMMITTER_NAME='root' GIT_COMMITTER_EMAIL='root@localhost' git commit -m 'Initial NixOS configuration' --author='root <root@localhost>' &>> {log_file_path}")),
-			].into()),
+			].into()));
+    steps.push(
 			(Line::from("Installing NixOS..."),
 			vec![
 			command!("sh", "-c", format!("echo Installing NixOS... &> {log_file_path}")),
 			command!("sh", "-c", format!("nixos-install --root /mnt --flake /mnt/etc/nixos#{hostname} &>> {log_file_path}")),
-			].into()),
+			].into()));
+    steps.push(
 			(Line::from("Finalizing installation..."),
 			vec![
 			command!("sleep", "1"),
 			command!("sh", "-c", format!("echo Installation complete! &> {log_file_path}")),
-			].into()),
-			])
+			].into()));
+
+    Ok(steps)
   }
 }
 
