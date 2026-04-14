@@ -4,10 +4,13 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     fenix.url = "github:nix-community/fenix";
+    fenix.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko/latest";
+    disko.inputs.nixpkgs.follows = "nixpkgs";
+    nixos-hardware.url = "github:NixOS/nixos-hardware/master";
   };
 
-  outputs = { self, nixpkgs, fenix, disko }@inputs:
+  outputs = { self, nixpkgs, fenix, disko, nixos-hardware, ... }@inputs:
   let
     system = "x86_64-linux";
     mkRustToolchain = fenix.packages.${system}.complete.withComponents;
@@ -47,9 +50,16 @@
           ./isoimage/config.nix
         ];
       };
+      installerIsoGraphical = nixpkgs.lib.nixosSystem {
+        specialArgs = { inherit inputs nixosWizard; };
+        modules = [
+          ./isoimage/config-graphical.nix
+        ];
+      };
     };
 
     isoImage = nixosConfigurations.installerIso.config.system.build.isoImage;
+    isoImageGraphical = nixosConfigurations.installerIsoGraphical.config.system.build.isoImage;
 
     packages.${system} = {
       default = nixosWizard;

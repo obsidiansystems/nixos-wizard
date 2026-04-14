@@ -425,6 +425,8 @@ impl Disk {
   /// Convert the disk into a `disko` config
   pub fn as_disko_cfg(&mut self) -> serde_json::Value {
     let mut partitions = serde_json::Map::new();
+    let mut zpool_name: Option<String> = None;
+
     for item in &self.layout {
       if let DiskItem::Partition(p) = item {
         if *p.status() == PartStatus::Delete {
@@ -441,12 +443,44 @@ impl Disk {
           self.size,
         );
 
-        if p.flags.contains(&"esp".to_string()) {
+        if p.fs_type() == Some("luks-zfs") {
+          // LUKS partition containing a ZFS pool
+          let pool = name.clone();
+          zpool_name = Some(pool.clone());
           partitions.insert(
             name,
             serde_json::json!({
               "size": size,
-              "type": p.fs_gpt_code(p.flags.contains(&"esp".to_string())),
+              "content": {
+                "type": "luks",
+                "name": format!("crypt{pool}"),
+                "content": {
+                  "type": "zfs",
+                  "pool": pool,
+                }
+              }
+            }),
+          );
+        } else if p.fs_type() == Some("zfs") {
+          // Plain ZFS partition (no LUKS)
+          let pool = name.clone();
+          zpool_name = Some(pool.clone());
+          partitions.insert(
+            name,
+            serde_json::json!({
+              "size": size,
+              "content": {
+                "type": "zfs",
+                "pool": pool,
+              }
+            }),
+          );
+        } else if p.flags.contains(&"esp".to_string()) {
+          partitions.insert(
+            name,
+            serde_json::json!({
+              "size": size,
+              "type": p.fs_gpt_code(true),
               "format": p.disko_fs_type(),
               "mountpoint": p.mount_point(),
             }),
@@ -466,14 +500,33 @@ impl Disk {
     }
     self.total_used_sectors = 0;
 
-    serde_json::json!({
+    let mut result = serde_json::json!({
       "device": format!("/dev/{}", self.name),
       "type": "disk",
       "content": {
         "type": "gpt",
         "partitions": partitions
       }
-    })
+    });
+
+    // Include zpool definition if this disk has a ZFS partition
+    if let Some(pool) = zpool_name {
+      result["zpool"] = serde_json::json!({
+        "name": pool,
+        "type": "zpool",
+        "rootFsOptions": {
+          "compression": "zstd",
+          "mountpoint": "none",
+        },
+        "datasets": {
+          "root": { "type": "zfs_fs", "mountpoint": "/" },
+          "home": { "type": "zfs_fs", "mountpoint": "/home" },
+          "nix":  { "type": "zfs_fs", "mountpoint": "/nix" },
+        }
+      });
+    }
+
+    result
   }
   pub fn name(&self) -> &str {
     &self.name
@@ -711,12 +764,12 @@ impl Disk {
   /// - Remaining space for root filesystem (specified fs_type or default)
   ///
   /// All existing partitions are marked for deletion
-  pub fn use_default_layout(&mut self, fs_type: Option<String>) {
+  pub fn use_default_layout(&mut self, _fs_type: Option<String>) {
     // Remove all free space and newly created partitions
     // Keep existing partitions so user can see what will be deleted
     self.layout.retain(|item| match item {
-      DiskItem::FreeSpace { .. } => false, // Remove all free space
-      DiskItem::Partition(part) => part.status != PartStatus::Create, // Remove created partitions
+      DiskItem::FreeSpace { .. } => false,
+      DiskItem::Partition(part) => part.status != PartStatus::Create,
     });
     // Mark all existing partitions for deletion
     for part in self.layout.iter_mut() {
@@ -725,36 +778,35 @@ impl Disk {
       };
       part.status = PartStatus::Delete
     }
-    // Create 500MB FAT32 boot partition starting at sector 2048 (1MB aligned)
-    // This serves as the EFI System Partition (ESP)
+    // 1GB FAT32 ESP boot partition
     let boot_part = Partition::new(
-      2048,                                 // Start at 1MB boundary
-      mb_to_sectors(500, self.sector_size), // 500MB size
+      2048,
+      mb_to_sectors(1024, self.sector_size),
       self.sector_size,
       PartStatus::Create,
       None,
-      Some("fat32".into()), // FAT32 filesystem
-      Some("/boot".into()), // Mount at /boot
-      Some("BOOT".into()),  // Partition label
+      Some("fat32".into()),
+      Some("/boot".into()),
+      Some("BOOT".into()),
       false,
-      vec!["boot".into(), "esp".into()], // Mark as bootable ESP
+      vec!["boot".into(), "esp".into()],
     );
-    // Create root partition using all remaining space
-    let root_part = Partition::new(
-      boot_part.end(),               // Start immediately after boot partition
-      self.size - (boot_part.end()), // Use all remaining disk space
+    // Remaining space for ZFS pool "tank"
+    // TODO: Add LUKS encryption once passphrase handling is implemented
+    let zfs_part = Partition::new(
+      boot_part.end(),
+      self.size - boot_part.end(),
       self.sector_size,
       PartStatus::Create,
       None,
-      fs_type,             // User-specified or default filesystem
-      Some("/".into()),    // Mount as root filesystem
-      Some("ROOT".into()), // Partition label
+      Some("zfs".into()),
+      None,
+      Some("tank".into()),
       false,
-      vec![], // No special flags
+      vec![],
     );
-    // Add the new partitions to the layout
     self.layout.push(DiskItem::Partition(boot_part));
-    self.layout.push(DiskItem::Partition(root_part));
+    self.layout.push(DiskItem::Partition(zfs_part));
   }
 }
 
@@ -931,6 +983,7 @@ impl Partition {
       "ext2" => Some("ext2"),
       "btrfs" => Some("btrfs"),
       "xfs" => Some("xfs"),
+      "zfs" => Some("zfs"),
       "fat12" => Some("vfat"),
       "fat16" => Some("vfat"),
       "fat32" => Some("vfat"),

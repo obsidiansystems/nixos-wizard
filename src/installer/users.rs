@@ -785,17 +785,14 @@ impl Page for AddUser {
           installer.users.push(User {
             username,
             password_hash: hashed,
-            groups: vec![],
+            groups: vec!["wheel".into()],
             shell: self.selected_shell.clone(),
             home_manager_cfg: None,
           });
-          let idx = installer.users.len() - 1;
-          self.created_user_idx = Some(idx);
+          self.created_user_idx = Some(installer.users.len() - 1);
           self.finished = true;
 
-          let groups_page = AlterUser::focus_edit_groups(idx, installer.users[idx].groups.clone());
-
-          Signal::Push(Box::new(groups_page))
+          Signal::Pop
         }
         _ => Signal::Wait,
       }

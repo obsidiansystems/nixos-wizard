@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -18,10 +20,23 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v13
 
       - name: Build
-        run: nix build .#isoImage
+        run: nix build .#isoImageGraphical
 
-      - name: Publish
-        uses: actions/upload-artifact@v7
+      - name: Extract version from ISO filename
+        id: version
+        run: |
+          ISO_PATH=$(ls result/iso/*.iso)
+          ISO_NAME=$(basename "$ISO_PATH")
+          # nixos-gnome-25.11.20250728.dc96378-x86_64-linux.iso -> 25.11.20250728.dc96378
+          VERSION=$(echo "$ISO_NAME" | sed 's/^nixos-gnome-//;s/-x86_64-linux\.iso$//')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "iso_path=$ISO_PATH" >> "$GITHUB_OUTPUT"
+          echo "iso_name=$ISO_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: nixos-iso
-          path: result/iso/*.iso
+          tag_name: v${{ steps.version.outputs.version }}
+          name: NixOS Wizard ${{ steps.version.outputs.version }}
+          files: ${{ steps.version.outputs.iso_path }}
+          generate_release_notes: true

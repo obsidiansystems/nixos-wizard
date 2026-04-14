@@ -98,11 +98,67 @@ pub struct Installer {
   /// If you can't find a good way to pass a value from one page to another
   /// Store it here, and use mem::take() on it in the receiving page
   pub shared_register: Option<Value>,
+
+  /// 8-character hex string for networking.hostId (required by ZFS)
+  pub host_id: String,
+
+  /// Detected nixos-hardware module path (e.g. "framework/13-inch/amd-ai-300-series")
+  pub hardware_module: Option<String>,
 }
 
 impl Installer {
   pub fn new() -> Self {
-    Self::default()
+    Self {
+      host_id: "00000000".into(),
+      enable_flakes: true,
+      audio_backend: Some("PipeWire".into()),
+      bootloader: Some("limine".into()),
+      hostname: Some("laptop".into()),
+      desktop_environment: Some("GNOME".into()),
+      network_backend: Some("NetworkManager".into()),
+      system_pkgs: vec![
+        "firefox".into(),
+        "slack".into(),
+        "zoom-us".into(),
+        "vscode".into(),
+      ],
+      hardware_module: Self::detect_hardware(),
+      ..Self::default()
+    }
+  }
+
+  /// Generate a deterministic 8-character hex hostId from the machine's MAC addresses.
+  /// This ensures the same hardware always produces the same hostId,
+  /// which is critical for ZFS pool imports across reinstalls.
+  fn generate_host_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut macs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+      for entry in entries.flatten() {
+        let addr_path = entry.path().join("address");
+        if let Ok(mac) = std::fs::read_to_string(&addr_path) {
+          let mac = mac.trim().to_string();
+          // Skip loopback and empty MACs
+          if mac != "00:00:00:00:00:00" && !mac.is_empty() {
+            macs.push(mac);
+          }
+        }
+      }
+    }
+    // Sort for determinism regardless of enumeration order
+    macs.sort();
+
+    let mut hasher = DefaultHasher::new();
+    macs.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
+  }
+
+  /// Hardware module for the target system
+  /// Hardcoded to Framework 13 AMD AI 300 series for now
+  fn detect_hardware() -> Option<String> {
+    Some("framework-amd-ai-300-series".into())
   }
 
   pub fn has_all_requirements(&self) -> bool {
@@ -134,7 +190,10 @@ impl Installer {
       "ssh_config": self.ssh_config,
       "system_pkgs": self.system_pkgs,
       "users": self.users,
-      "kernels": self.kernels
+      "kernels": self.kernels,
+      "host_id": self.host_id,
+      "allow_unfree": true,
+      "hardware_module": self.hardware_module
     });
 
     // drive configuration — collect disko configs from all configured drives
@@ -258,18 +317,10 @@ impl MenuPages {
     &[
       MenuPages::KeyboardLayout,
       MenuPages::Locale,
-      MenuPages::EnableFlakes,
+      MenuPages::Timezone,
       MenuPages::Drives,
-      MenuPages::Bootloader,
-      MenuPages::Swap,
-      MenuPages::Hostname,
       MenuPages::RootPassword,
       MenuPages::UserAccounts,
-      MenuPages::DesktopEnvironment,
-      MenuPages::Audio,
-      MenuPages::SystemPackages,
-      MenuPages::Network,
-      MenuPages::Timezone,
     ]
   }
 }
@@ -4194,7 +4245,7 @@ impl ConfigPreview {
     Ok(Self {
       system_config: configs.system,
       disko_config: configs.disko,
-      _flake_path: configs.flake_path,
+      _flake_path: None,
       scroll_position: 0,
       button_row,
       current_view: ConfigView::System,
@@ -4448,6 +4499,8 @@ pub struct InstallProgress<'a> {
   // we only hold onto these to keep them alive during installation
   _system_cfg: NamedTempFile,
   _disko_cfg: NamedTempFile,
+  _flake_nix: NamedTempFile,
+  _flake_lock: NamedTempFile,
   _log_file: NamedTempFile,
 }
 
@@ -4456,12 +4509,24 @@ impl<'a> InstallProgress<'a> {
     installer: Installer,
     system_cfg: NamedTempFile,
     disko_cfg: NamedTempFile,
+    flake_nix: NamedTempFile,
+    flake_lock: NamedTempFile,
   ) -> anyhow::Result<Self> {
     let log_file = NamedTempFile::new()?;
     let log_path = log_file
       .path()
       .to_str()
       .ok_or_else(|| anyhow::anyhow!("Invalid log file path"))?
+      .to_string();
+    let flake_nix_path = flake_nix
+      .path()
+      .to_str()
+      .ok_or_else(|| anyhow::anyhow!("Invalid flake.nix path"))?
+      .to_string();
+    let flake_lock_path = flake_lock
+      .path()
+      .to_str()
+      .ok_or_else(|| anyhow::anyhow!("Invalid flake.lock path"))?
       .to_string();
     let install_steps = Self::install_commands(
       &installer,
@@ -4475,6 +4540,8 @@ impl<'a> InstallProgress<'a> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid disko config path"))?
         .to_string(),
+      flake_nix_path,
+      flake_lock_path,
       log_path.clone(),
     )?;
     let steps = InstallSteps::new("Install Steps", install_steps);
@@ -4517,6 +4584,8 @@ impl<'a> InstallProgress<'a> {
       signal: None,
       _system_cfg: system_cfg,
       _disko_cfg: disko_cfg,
+      _flake_nix: flake_nix,
+      _flake_lock: flake_lock,
       _log_file: log_file,
     })
   }
@@ -4534,6 +4603,8 @@ impl<'a> InstallProgress<'a> {
     installer: &Installer,
     system_cfg_path: String,
     disk_cfg_path: String,
+    flake_nix_path: String,
+    flake_lock_path: String,
     log_file_path: String,
   ) -> anyhow::Result<Vec<(Line<'static>, VecDeque<Command>)>> {
     if installer.dry_run {
@@ -4548,15 +4619,17 @@ impl<'a> InstallProgress<'a> {
         command!("sh", "-c", format!("echo '[DRY RUN] Would run: disko --yes-wipe-all-disks --mode destroy,format,mount {disk_cfg_path}' > {log_file_path}")),
         command!("sh", "-c", format!("echo '[DRY RUN] Disko config contents:' >> {log_file_path} && cat {disk_cfg_path} >> {log_file_path}")),
         ].into()),
-        (Line::from("[DRY RUN] Building NixOS configuration (skipped)..."),
+        (Line::from("[DRY RUN] Writing NixOS configuration (skipped)..."),
         vec![
-        command!("sh", "-c", format!("echo '[DRY RUN] Would run: nixos-generate-config --root /mnt' > {log_file_path}")),
-        command!("sh", "-c", format!("echo '[DRY RUN] Would run: cp {system_cfg_path} /mnt/etc/nixos/configuration.nix' >> {log_file_path}")),
-        command!("sh", "-c", format!("echo '[DRY RUN] System config contents:' >> {log_file_path} && cat {system_cfg_path} >> {log_file_path}")),
+        command!("sh", "-c", format!("echo '[DRY RUN] Would write:' > {log_file_path}")),
+        command!("sh", "-c", format!("echo '--- configuration.nix ---' >> {log_file_path} && cat {system_cfg_path} >> {log_file_path}")),
+        command!("sh", "-c", format!("echo '--- disko.nix ---' >> {log_file_path} && cat {disk_cfg_path} >> {log_file_path}")),
+        command!("sh", "-c", format!("echo '--- flake.nix ---' >> {log_file_path} && cat {flake_nix_path} >> {log_file_path}")),
+        command!("sh", "-c", format!("echo '--- flake.lock ---' >> {log_file_path} && cat {flake_lock_path} >> {log_file_path}")),
         ].into()),
         (Line::from("[DRY RUN] Installing NixOS (skipped)..."),
         vec![
-        command!("sh", "-c", format!("echo '[DRY RUN] Would run: nixos-install --root /mnt' > {log_file_path}")),
+        command!("sh", "-c", format!("echo '[DRY RUN] Would run: nixos-install --root /mnt --flake /mnt/etc/nixos#nixos' > {log_file_path}")),
         ].into()),
         (Line::from("[DRY RUN] Finalizing..."),
         vec![
@@ -4565,39 +4638,44 @@ impl<'a> InstallProgress<'a> {
       ]);
     }
 
+    let hostname = installer.hostname.as_deref().unwrap_or("laptop");
+    let host_id = &installer.host_id;
+
     Ok(vec![
-			(Line::from("Beginning NixOS Installation..."),
-			vec![
-			command!("sh", "-c", format!("echo Beginning NixOS Installation... 2>&1 > {log_file_path}")),
-			command!("sleep", "1"),
-			].into()),
 			(Line::from("Configuring disk layout..."),
 			vec![
-			command!("sh", "-c", format!("echo Partitioning disks... 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("disko --yes-wipe-all-disks --mode destroy,format,mount {disk_cfg_path} 2>&1 > {log_file_path}")),
+			command!("sh", "-c", format!("echo Partitioning disks... &> {log_file_path}")),
+			command!("sh", "-c", format!("disko --yes-wipe-all-disks --mode destroy,format,mount {disk_cfg_path} &>> {log_file_path}")),
 			].into()),
-			(Line::from("Building NixOS configuration..."),
+			(Line::from("Generating hardware config..."),
 			vec![
-			command!("sh", "-c", format!("echo Building NixOS configuration... 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("nixos-generate-config --root /mnt 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("cp -v {system_cfg_path} /mnt/etc/nixos/configuration.nix 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("echo Build completed 2>&1 > {log_file_path}")),
+			command!("sh", "-c", format!("echo Generating hardware configuration... &> {log_file_path}")),
+			command!("sh", "-c", format!("nixos-generate-config --no-filesystems --root /mnt &>> {log_file_path}")),
+			].into()),
+			(Line::from("Writing NixOS configuration..."),
+			vec![
+			command!("sh", "-c", format!("echo Writing configuration files... &> {log_file_path}")),
+			command!("sh", "-c", format!("cp -v {system_cfg_path} /mnt/etc/nixos/configuration.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("cp -v {disk_cfg_path} /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("cp -v {flake_nix_path} /mnt/etc/nixos/flake.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("cp -v {flake_lock_path} /mnt/etc/nixos/flake.lock &>> {log_file_path}")),
+			].into()),
+			(Line::from("Initializing git repo..."),
+			vec![
+			command!("sh", "-c", format!("echo Initializing git repo... &>> {log_file_path}")),
+			command!("sh", "-c", format!("cd /mnt/etc/nixos && git init &>> {log_file_path}")),
+			command!("sh", "-c", format!("cd /mnt/etc/nixos && git add -A &>> {log_file_path}")),
+			command!("sh", "-c", format!("cd /mnt/etc/nixos && GIT_COMMITTER_NAME='root' GIT_COMMITTER_EMAIL='root@localhost' git commit -m 'Initial NixOS configuration' --author='root <root@localhost>' &>> {log_file_path}")),
 			].into()),
 			(Line::from("Installing NixOS..."),
 			vec![
-			command!("sh", "-c", format!("echo Installing NixOS... 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("nixos-install --root /mnt 2>&1 > {log_file_path}")),
-			].into()),
-			(Line::from("Importing channels..."),
-			vec![
-			command!("sh", "-c", format!("echo Importing NixOS channels... 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("nixos-enter -- nix-channel --add https://nixos.org/channels/nixos-unstable nixos 2>&1 > {log_file_path}")),
-			command!("sh", "-c", format!("nixos-enter -- nix-channel --update 2>&1 > {log_file_path}")),
+			command!("sh", "-c", format!("echo Installing NixOS... &> {log_file_path}")),
+			command!("sh", "-c", format!("nixos-install --root /mnt --flake /mnt/etc/nixos#{hostname} &>> {log_file_path}")),
 			].into()),
 			(Line::from("Finalizing installation..."),
 			vec![
 			command!("sleep", "1"),
-			command!("sh", "-c", format!("echo Installation complete! 2>&1 > {log_file_path}")),
+			command!("sh", "-c", format!("echo Installation complete! &> {log_file_path}")),
 			].into()),
 			])
   }

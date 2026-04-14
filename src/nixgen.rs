@@ -84,9 +84,35 @@ pub fn highlight_nix(nix: &str) -> anyhow::Result<String> {
 /// Container for generated NixOS configuration files
 #[derive(Debug)]
 pub struct Configs {
-  pub system: String,             // NixOS system configuration
-  pub disko: String,              // Disk partitioning configuration
-  pub flake_path: Option<String>, // Optional flake path for advanced users
+  pub system: String,             // configuration.nix
+  pub disko: String,              // disko.nix
+  pub flake_nix: String,          // flake.nix
+  pub flake_lock: String,         // flake.lock
+}
+
+/// Lock info for a flake input, extracted from this repo's flake.lock at compile time
+struct InputLock {
+  owner: String,
+  repo: String,
+  rev: String,
+  nar_hash: String,
+  last_modified: u64,
+}
+
+/// The flake.lock from this repo, embedded at compile time
+const UPSTREAM_FLAKE_LOCK: &str = include_str!("../flake.lock");
+
+/// Parse lock info for any input node from the embedded flake.lock
+fn parse_input_lock(node_name: &str) -> Option<InputLock> {
+  let lock: Value = serde_json::from_str(UPSTREAM_FLAKE_LOCK).ok()?;
+  let locked = &lock["nodes"][node_name]["locked"];
+  Some(InputLock {
+    owner: locked["owner"].as_str()?.to_string(),
+    repo: locked["repo"].as_str()?.to_string(),
+    rev: locked["rev"].as_str()?.to_string(),
+    nar_hash: locked["narHash"].as_str()?.to_string(),
+    last_modified: locked["lastModified"].as_u64()?,
+  })
 }
 
 /// Converts JSON configuration to NixOS configuration files
@@ -102,31 +128,173 @@ impl NixWriter {
   pub fn new(config: Value) -> Self {
     Self { config }
   }
-  /// Generate both system and disko configurations from the JSON config
+  /// Generate all configuration files: flake.nix, flake.lock, configuration.nix, disko.nix
   pub fn write_configs(&self) -> anyhow::Result<Configs> {
-    // Generate disko (disk partitioning) configuration
     let disko = {
       let config = self.config["disko"].clone();
       self.write_disko_config(config)?
     };
 
-    // Generate NixOS system configuration
     let sys_cfg = {
       let config = self.config["config"].clone();
       self.write_sys_config(config)?
     };
 
-    // Extract optional flake path for advanced users
-    let flake_path = self
-      .config
-      .get("flake_path")
-      .and_then(|v| v.as_str().map(|s| s.to_string()));
+    let hostname = self.config["config"]["hostname"]
+      .as_str()
+      .unwrap_or("nixos")
+      .to_string();
+    let hardware_module = self.config["config"]["hardware_module"]
+      .as_str()
+      .map(|s| s.to_string());
+
+    let (flake_nix, flake_lock) = self.write_flake(&hostname, hardware_module.as_deref())?;
 
     Ok(Configs {
       system: sys_cfg,
       disko,
-      flake_path,
+      flake_nix,
+      flake_lock,
     })
+  }
+
+  /// Generate flake.nix and flake.lock for the installed system
+  fn write_flake(
+    &self,
+    hostname: &str,
+    hardware_module: Option<&str>,
+  ) -> anyhow::Result<(String, String)> {
+    let nixpkgs_lock = parse_input_lock("nixpkgs")
+      .ok_or_else(|| anyhow::anyhow!("Failed to parse nixpkgs from embedded flake.lock"))?;
+    let disko_lock = parse_input_lock("disko")
+      .ok_or_else(|| anyhow::anyhow!("Failed to parse disko from embedded flake.lock"))?;
+    let hw_lock = hardware_module
+      .is_some()
+      .then(|| parse_input_lock("nixos-hardware"))
+      .flatten();
+
+    // Build flake inputs
+    let mut input_lines = vec![
+      r#"    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";"#.to_string(),
+      r#"    disko.url = "github:nix-community/disko/latest";"#.to_string(),
+      r#"    disko.inputs.nixpkgs.follows = "nixpkgs";"#.to_string(),
+    ];
+    if hardware_module.is_some() {
+      input_lines.push(r#"    nixos-hardware.url = "github:NixOS/nixos-hardware/master";"#.to_string());
+    }
+    let inputs = input_lines.join("\n");
+
+    // Build module imports
+    let mut module_lines = vec![
+      "          disko.nixosModules.disko".to_string(),
+      "          ./configuration.nix".to_string(),
+      "          ./disko.nix".to_string(),
+    ];
+    if let Some(hw_mod) = hardware_module {
+      module_lines.push(format!("          nixos-hardware.nixosModules.{hw_mod}"));
+    }
+    let modules = module_lines.join("\n");
+
+    // Build output args
+    let mut output_args = vec!["nixpkgs", "disko"];
+    if hardware_module.is_some() {
+      output_args.push("nixos-hardware");
+    }
+    let output_args_str = output_args.join(", ");
+
+    let flake_nix = format!(
+      r#"{{
+  description = "NixOS system configuration";
+
+  inputs = {{
+{inputs}
+  }};
+
+  outputs = {{ {output_args_str}, ... }}: {{
+    nixosConfigurations.{hostname} = nixpkgs.lib.nixosSystem {{
+      modules = [
+{modules}
+      ];
+    }};
+  }};
+}}"#
+    );
+
+    // Generate flake.lock pinning all inputs to the same versions as the installer ISO
+    let mut lock_nodes = serde_json::json!({
+      "disko": {
+        "inputs": {
+          "nixpkgs": ["nixpkgs"]
+        },
+        "locked": {
+          "lastModified": disko_lock.last_modified,
+          "narHash": disko_lock.nar_hash,
+          "owner": disko_lock.owner,
+          "repo": disko_lock.repo,
+          "rev": disko_lock.rev,
+          "type": "github"
+        },
+        "original": {
+          "owner": "nix-community",
+          "ref": "latest",
+          "repo": "disko",
+          "type": "github"
+        }
+      },
+      "nixpkgs": {
+        "locked": {
+          "lastModified": nixpkgs_lock.last_modified,
+          "narHash": nixpkgs_lock.nar_hash,
+          "owner": nixpkgs_lock.owner,
+          "repo": nixpkgs_lock.repo,
+          "rev": nixpkgs_lock.rev,
+          "type": "github"
+        },
+        "original": {
+          "owner": "nixos",
+          "ref": "nixos-unstable",
+          "repo": "nixpkgs",
+          "type": "github"
+        }
+      },
+      "root": {
+        "inputs": {
+          "disko": "disko",
+          "nixpkgs": "nixpkgs"
+        }
+      }
+    });
+
+    if let Some(hw) = hw_lock {
+      lock_nodes["nixos-hardware"] = serde_json::json!({
+        "inputs": {},
+        "locked": {
+          "lastModified": hw.last_modified,
+          "narHash": hw.nar_hash,
+          "owner": hw.owner,
+          "repo": hw.repo,
+          "rev": hw.rev,
+          "type": "github"
+        },
+        "original": {
+          "owner": "NixOS",
+          "ref": "master",
+          "repo": "nixos-hardware",
+          "type": "github"
+        }
+      });
+      lock_nodes["root"]["inputs"]["nixos-hardware"] = serde_json::json!("nixos-hardware");
+    }
+
+    let flake_lock = serde_json::json!({
+      "nodes": lock_nodes,
+      "root": "root",
+      "version": 7
+    });
+
+    let flake_lock_str = serde_json::to_string_pretty(&flake_lock)?;
+
+    Ok((flake_nix, flake_lock_str))
   }
   /// Generate the main NixOS system configuration (configuration.nix)
   ///
@@ -163,6 +331,12 @@ impl NixWriter {
           .filter(|&b| b)
           .map(|_| Self::parse_enable_flakes()),
         "greeter" => None,
+        "allow_unfree" => value
+          .as_bool()
+          .filter(|&b| b)
+          .map(|_| Self::parse_allow_unfree()),
+        "hardware_module" => None, // handled separately for imports/let-bindings
+        "host_id" => value.as_str().map(Self::parse_host_id),
         "hostname" => value.as_str().map(Self::parse_hostname),
         "kernels" => value.as_array().map(Self::parse_kernels),
         "keyboard_layout" => value.as_str().map(Self::parse_kb_layout),
@@ -191,42 +365,53 @@ impl NixWriter {
         cfg_attrs = merge_attrs!(cfg_attrs, config);
       }
     }
-    // Set up imports based on whether home-manager is needed
-    let imports = if install_home_manager {
-      String::from(
-        r#"{imports = [ (import "${home-manager}/nixos") ./hardware-configuration.nix ];}"#,
-      )
-    } else {
-      String::from("{imports = [./hardware-configuration.nix];}")
-    };
 
-    // Set the NixOS state version (required for all configurations)
+    // If hardware module detected, enable fwupd
+    if cfg.get("hardware_module").and_then(|v| v.as_str()).is_some() {
+      let fwupd = attrset! {
+        "services.fwupd.enable" = true;
+      };
+      cfg_attrs = merge_attrs!(cfg_attrs, fwupd);
+    }
+
+    // Build imports list — hardware-configuration.nix for kernel modules etc,
+    // but filesystem entries come from disko (generated with --no-filesystems)
+    let mut import_entries = vec!["./hardware-configuration.nix".to_string()];
+    if install_home_manager {
+      import_entries.insert(0, r#"(import "${home-manager}/nixos")"#.to_string());
+    }
+    let imports_str = import_entries.join(" ");
+    let imports = format!("{{imports = [ {imports_str} ];}}" );
+
     let state_version = attrset! {
       "system.stateVersion" = nixstr("25.11");
     };
 
-    // Combine all configuration attributes
-    cfg_attrs = merge_attrs!(imports, cfg_attrs, state_version);
+    // ZFS boot support — always enabled since ZFS is the only filesystem
+    let zfs_boot = attrset! {
+      "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
+      "boot.zfs.extraPools" = r#"[ "tank" ]"#;
+    };
 
-    // Build let-binding declarations for external dependencies
+    cfg_attrs = merge_attrs!(imports, cfg_attrs, state_version, zfs_boot);
+
+    // Home-manager still uses fetchTarball (not yet a flake input)
     let mut let_statement_declarations = vec![];
-    // Add home-manager dependency if any users need it
     if install_home_manager {
       let_statement_declarations.push(
         "home-manager = builtins.fetchTarball https://github.com/nix-community/home-manager/archive/release-25.05.tar.gz;"
       )
     }
 
-    // Construct the let-in statement if we have dependencies
-    let let_stmt = if !let_statement_declarations.is_empty() {
+    let use_let = !let_statement_declarations.is_empty();
+    let let_stmt = if use_let {
       let joined_stmts = let_statement_declarations.join(" ");
       format!("let {joined_stmts} in ")
     } else {
       "".to_string()
     };
 
-    // Generate the final Nix function and format it
-    let raw = if install_home_manager {
+    let raw = if use_let {
       format!("{{ config, pkgs, ... }}: {let_stmt} {cfg_attrs}")
     } else {
       format!("{{ config, pkgs, ... }}: {cfg_attrs}")
@@ -245,13 +430,12 @@ impl NixWriter {
       .as_array()
       .ok_or_else(|| anyhow::anyhow!("Expected disko config to be an array of disk configs"))?;
 
-    let mut disk_attrs = Vec::new();
+    let mut attrs = Vec::new();
     for disk in disks {
       let device = disk["device"].as_str().unwrap_or("/dev/sda");
       let disk_type = disk["type"].as_str().unwrap_or("disk");
       let content = Self::parse_disko_content(&disk["content"])?;
 
-      // Derive a disko-friendly name from the device path (e.g. /dev/nvme0n1 -> nvme0n1)
       let disk_name = device.rsplit('/').next().unwrap_or("main");
 
       let disko_config = attrset! {
@@ -260,10 +444,50 @@ impl NixWriter {
         "content" = content;
       };
 
-      disk_attrs.push(format!("disko.devices.disk.{disk_name} = {disko_config};"));
+      attrs.push(format!("disko.devices.disk.{disk_name} = {disko_config};"));
+
+      // Emit zpool definition if present
+      if let Some(zpool) = disk.get("zpool") {
+        let pool_name = zpool["name"].as_str().unwrap_or("tank");
+        let pool_type = zpool["type"].as_str().unwrap_or("zpool");
+
+        // rootFsOptions
+        let mut root_fs_opts = Vec::new();
+        if let Some(opts) = zpool["rootFsOptions"].as_object() {
+          for (k, v) in opts {
+            if let Some(s) = v.as_str() {
+              root_fs_opts.push(format!("{k} = {};", nixstr(s)));
+            }
+          }
+        }
+        let root_fs_options_attr = format!("{{ {} }}", root_fs_opts.join(" "));
+
+        // datasets
+        let mut dataset_attrs = Vec::new();
+        if let Some(datasets) = zpool["datasets"].as_object() {
+          for (name, ds) in datasets {
+            let ds_type = ds["type"].as_str().unwrap_or("zfs_fs");
+            let ds_mountpoint = ds["mountpoint"].as_str().unwrap_or("/");
+            let ds_attr = attrset! {
+              "type" = nixstr(ds_type);
+              mountpoint = nixstr(ds_mountpoint);
+            };
+            dataset_attrs.push(format!("{} = {};", nixstr(name), ds_attr));
+          }
+        }
+        let datasets_attr = format!("{{ {} }}", dataset_attrs.join(" "));
+
+        let pool_config = attrset! {
+          "type" = nixstr(pool_type);
+          "rootFsOptions" = root_fs_options_attr;
+          "datasets" = datasets_attr;
+        };
+
+        attrs.push(format!("disko.devices.zpool.{pool_name} = {pool_config};"));
+      }
     }
 
-    let raw = format!("{{ {} }}", disk_attrs.join(" "));
+    let raw = format!("{{ {} }}", attrs.join(" "));
     fmt_nix(raw)
   }
 
@@ -306,15 +530,53 @@ impl NixWriter {
   }
 
   fn parse_partition(partition: &Value) -> anyhow::Result<String> {
+    let size = partition["size"]
+      .as_str()
+      .ok_or_else(|| anyhow::anyhow!("Missing required 'size' field in partition"))?;
+
+    // LUKS + ZFS: content.type = "luks", content.content.type = "zfs"
+    if let Some(content) = partition.get("content") {
+      if content["type"].as_str() == Some("luks") {
+        let luks_name = content["name"]
+          .as_str()
+          .ok_or_else(|| anyhow::anyhow!("LUKS partition missing 'name' in content"))?;
+        let inner = &content["content"];
+        let pool = inner["pool"]
+          .as_str()
+          .ok_or_else(|| anyhow::anyhow!("LUKS-ZFS partition missing 'pool'"))?;
+        return Ok(attrset! {
+          size = nixstr(size);
+          content = attrset! {
+            type = nixstr("luks");
+            name = nixstr(luks_name);
+            content = attrset! {
+              type = nixstr("zfs");
+              pool = nixstr(pool);
+            };
+          };
+        });
+      }
+      if content["type"].as_str() == Some("zfs") {
+        let pool = content["pool"]
+          .as_str()
+          .ok_or_else(|| anyhow::anyhow!("ZFS partition missing 'pool' in content"))?;
+        return Ok(attrset! {
+          size = nixstr(size);
+          content = attrset! {
+            type = nixstr("zfs");
+            pool = nixstr(pool);
+          };
+        });
+      }
+    }
+
+    // Regular filesystem partition
     let format = partition["format"]
       .as_str()
       .ok_or_else(|| anyhow::anyhow!("Missing required 'format' field in partition"))?;
     let mountpoint = partition["mountpoint"]
       .as_str()
       .ok_or_else(|| anyhow::anyhow!("Missing required 'mountpoint' field in partition"))?;
-    let size = partition["size"]
-      .as_str()
-      .ok_or_else(|| anyhow::anyhow!("Missing required 'size' field in partition"))?;
     let part_type = partition.get("type").and_then(|v| v.as_str());
     log::debug!(
       "Parsing partition: format={format}, mountpoint={mountpoint}, size={size}, type={part_type:?}"
@@ -472,6 +734,16 @@ impl NixWriter {
       String::from("{}")
     }
   }
+  fn parse_allow_unfree() -> String {
+    attrset! {
+      "nixpkgs.config.allowUnfree" = true;
+    }
+  }
+  fn parse_host_id(value: &str) -> String {
+    attrset! {
+      "networking.hostId" = nixstr(value);
+    }
+  }
   fn parse_hostname(value: &str) -> String {
     attrset! {
       "networking.hostName" = nixstr(value);
@@ -573,6 +845,9 @@ impl NixWriter {
           efiSupport = true;
         };
         "efi.canTouchEfiVariables" = true;
+      },
+      "limine" => attrset! {
+        "limine.enable" = true;
       },
       _ => String::new(),
     };

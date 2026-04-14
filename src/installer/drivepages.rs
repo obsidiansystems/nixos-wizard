@@ -476,7 +476,10 @@ impl Page for SelectDrive {
 
               installer.editing_drive = Some(editing);
               if installer.use_auto_disk_config {
-                Signal::Push(Box::new(SelectFilesystem::new(None)))
+                if let Some(config) = installer.editing_drive.as_mut() {
+                  config.use_default_layout(None);
+                }
+                Signal::Wait
               } else {
                 let Some(ref drive) = installer.editing_drive else {
                   return Signal::Error(anyhow::anyhow!("No drive config available"));
@@ -588,6 +591,7 @@ impl SelectFilesystem {
       Box::new(Button::new("fat16")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("fat32")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("ntfs")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("zfs")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("Back")) as Box<dyn ConfigWidget>,
     ];
     let mut button_row = WidgetBox::button_menu(buttons);

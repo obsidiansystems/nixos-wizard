@@ -192,20 +192,26 @@ fn handle_signal(
         Ok(cfg) => {
           debug!("system config: {}", cfg.system);
           debug!("disko config: {}", cfg.disko);
-          debug!("flake_path: {:?}", cfg.flake_path);
+          debug!("flake.nix: {}", cfg.flake_nix);
 
           // Create temporary files to hold the generated configurations
           let mut system_cfg = NamedTempFile::new()?;
           let mut disko_cfg = NamedTempFile::new()?;
+          let mut flake_nix = NamedTempFile::new()?;
+          let mut flake_lock = NamedTempFile::new()?;
 
           write!(system_cfg, "{}", cfg.system)?;
           write!(disko_cfg, "{}", cfg.disko)?;
+          write!(flake_nix, "{}", cfg.flake_nix)?;
+          write!(flake_lock, "{}", cfg.flake_lock)?;
 
           // Navigate to the installation progress page
           page_stack.push(Box::new(InstallProgress::new(
             installer.clone(),
             system_cfg,
             disko_cfg,
+            flake_nix,
+            flake_lock,
           )?));
         }
         Err(e) => {
