@@ -7,8 +7,56 @@
   # LTS kernel
   boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
 
-  # Skip GNOME Tour on first login
-  environment.gnome.excludePackages = [ pkgs.gnome-tour ];
+  # Trim ISO size — exclude GNOME apps not needed for the installer
+  environment.gnome.excludePackages = with pkgs; [
+    gnome-tour
+    orca
+    gnome-maps
+    gnome-music
+    gnome-weather
+    gnome-contacts
+    gnome-calendar
+    gnome-clocks
+    gnome-characters
+    gnome-font-viewer
+    gnome-connections
+    gnome-logs
+    epiphany
+    totem
+    yelp
+    evince
+    geary
+    cheese
+    simple-scan
+    snapshot
+    baobab
+  ];
+
+  # Better compression to fit under 2GB GitHub release limit
+  isoImage.squashfsCompression = "xz -Xdict-size 100%";
+
+  # Disable docs to save ~800MB (ghc-doc, gnome-user-docs, man pages)
+  documentation.enable = lib.mkForce false;
+
+  # Disable TTS/speech to save ~300MB (mbrola-voices, flite, speechd)
+  services.speechd.enable = lib.mkForce false;
+
+  # Trimmed firmware — only AMD GPU, AMD microcode, Intel WiFi/BT (Framework laptop)
+  hardware.enableRedistributableFirmware = lib.mkForce false;
+  hardware.firmware = lib.mkForce [
+    (pkgs.runCommandLocal "linux-firmware-framework" {} ''
+      mkdir -p $out/lib/firmware
+      for dir in amdgpu amd intel; do
+        cp -rL ${pkgs.linux-firmware}/lib/firmware/$dir $out/lib/firmware/
+      done
+      # iwlwifi ucode files are at the top level
+      cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
+    '')
+    pkgs.sof-firmware
+  ];
+
+  # Disable Samba file sharing
+  services.samba.enable = lib.mkForce false;
 
   environment.systemPackages = [ pkgs.gnome-terminal ];
 

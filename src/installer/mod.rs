@@ -120,12 +120,7 @@ impl Installer {
       hostname: Some("laptop".into()),
       desktop_environment: Some("GNOME".into()),
       network_backend: Some("NetworkManager".into()),
-      system_pkgs: vec![
-        "firefox".into(),
-        "slack".into(),
-        "zoom-us".into(),
-        "vscode".into(),
-      ],
+      system_pkgs: vec![],
       hardware_module: Self::detect_hardware(),
       ..Self::default()
     }

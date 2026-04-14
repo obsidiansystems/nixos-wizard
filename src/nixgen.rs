@@ -494,7 +494,7 @@ impl NixWriter {
 
   /// Generate extras.nix — bundled opinionated defaults separate from user choices
   ///
-  /// Contains: fwupd, welcome script, Firefox policies, Gather package
+  /// Contains: default apps, fwupd, welcome script, Firefox policies, Gather package
   fn write_extras_config(&self) -> anyhow::Result<String> {
     let raw = r#"
       # extras.nix — opinionated defaults bundled by nixos-wizard.
@@ -504,18 +504,33 @@ impl NixWriter {
         # Firmware update daemon
         services.fwupd.enable = true;
 
-        # Gather (flake input, not in nixpkgs)
-        environment.systemPackages = [
+        # Default apps
+        environment.systemPackages = (with pkgs; [
+          firefox
+          slack
+          zoom-us
+          vscode
+          gnome-firmware
+        ]) ++ [
           gather-linux.packages.${pkgs.system}.default
         ];
 
-        # Suppress Firefox first-run pages
+        # Suppress Firefox first-run pages and default browser prompt
         programs.firefox = {
           enable = true;
           policies = {
             DisableProfileImport = true;
+            DontCheckDefaultBrowser = true;
             OverrideFirstRunPage = "";
             OverridePostUpdatePage = "";
+          };
+          preferences = {
+            "browser.startup.homepage_override.mstone" = "ignore";
+            "startup.homepage_welcome_url" = "";
+            "startup.homepage_welcome_url.additional" = "";
+            "browser.startup.firstrunSkipsHomepage" = true;
+            "datareporting.policy.dataSubmissionPolicyBypassNotification" = true;
+            "trailhead.firstrun.didSeeAboutWelcome" = true;
           };
         };
 
@@ -538,6 +553,7 @@ impl NixWriter {
           firefox https://mail.google.com &
           slack &
           gather-linux &
+          gnome-firmware &
           touch "$FLAG"
         '';
       }
