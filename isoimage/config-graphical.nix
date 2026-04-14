@@ -60,6 +60,13 @@
 
   environment.systemPackages = [ pkgs.gnome-terminal ];
 
+  # Disable GNOME background services that cause heavy I/O on login
+  services.gnome.tracker-miners.enable = false;
+  services.gnome.tracker.enable = false;
+  services.gnome.gnome-online-accounts.enable = false;
+  services.gnome.evolution-data-server.enable = lib.mkForce false;
+  services.gnome.gnome-software.enable = false;
+
   # Force dark theme for GNOME Terminal
   programs.dconf.profiles.user.databases = [{
     settings."org/gnome/terminal/legacy/profiles:/:b1dcc9dd-5262-4d8d-a863-c897e6d979b9" = {

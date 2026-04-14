@@ -4534,21 +4534,17 @@ impl Page for ConfigPreview {
     let visible_lines = chunks[1].height as usize - 2; // Account for borders
     self.visible_lines = visible_lines;
 
-    let start_line = self.scroll_position;
-    let end_line = std::cmp::min(start_line + visible_lines, lines.len());
-    let display_lines = lines[start_line..end_line].to_vec();
-
-    let config_paragraph = Paragraph::new(display_lines)
+    let config_paragraph = Paragraph::new(lines)
       .block(Block::default().borders(Borders::ALL).title(format!(
         "Preview - {} Config (Scroll: {}/{})",
         match self.current_view {
           ConfigView::System => "System",
           ConfigView::Disko => "Disko",
         },
-        start_line + 1,
+        self.scroll_position + 1,
         self.get_max_scroll(visible_lines) + 1
       )))
-      .wrap(Wrap { trim: false });
+      .scroll((self.scroll_position as u16, 0));
     f.render_widget(config_paragraph, chunks[1]);
 
     // Buttons

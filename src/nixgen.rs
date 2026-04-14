@@ -460,7 +460,6 @@ impl NixWriter {
       "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
       "boot.zfs.extraPools" = r#"[ "tank" ]"#;
       "boot.zfs.forceImportAll" = true;
-      "boot.zfs.devNodes" = nixstr("/dev/disk/by-id");
       "boot.zfs.requestEncryptionCredentials" = r#"[ "tank" ]"#;
     };
 
@@ -504,12 +503,18 @@ impl NixWriter {
         # Firmware update daemon
         services.fwupd.enable = true;
 
+        # Disable Tracker file indexing — causes heavy I/O on login
+        services.gnome.tracker-miners.enable = false;
+        services.gnome.tracker.enable = false;
+
         # Default apps
         environment.systemPackages = (with pkgs; [
           firefox
           slack
           zoom-us
           vscode
+          git
+          gh
           gnome-firmware
         ]) ++ [
           gather-linux.packages.${pkgs.system}.default
