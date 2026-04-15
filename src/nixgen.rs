@@ -507,6 +507,15 @@ impl NixWriter {
         services.gnome.tracker-miners.enable = false;
         services.gnome.tracker.enable = false;
 
+        # Direnv for automatic nix shell activation
+        programs.direnv.enable = true;
+
+        # Monthly ZFS scrub for data integrity checking
+        services.zfs.autoScrub = {
+          enable = true;
+          interval = "monthly";
+        };
+
         # Default apps
         environment.systemPackages = (with pkgs; [
           firefox
