@@ -51,6 +51,11 @@
       done
       # iwlwifi ucode files are at the top level
       cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
+      # MediaTek MT7922 (RZ616) WiFi+BT — Framework 13 AMD board option
+      mkdir -p $out/lib/firmware/mediatek
+      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin $out/lib/firmware/mediatek/
+      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin $out/lib/firmware/mediatek/
+      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin $out/lib/firmware/mediatek/
     '')
     pkgs.sof-firmware
   ];
