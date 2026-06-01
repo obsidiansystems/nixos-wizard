@@ -43,6 +43,7 @@
 
   # Trimmed firmware — only AMD GPU, AMD microcode, Intel WiFi/BT (Framework laptop)
   hardware.enableRedistributableFirmware = lib.mkForce false;
+  hardware.wirelessRegulatoryDatabase = true;
   hardware.firmware = lib.mkForce [
     (pkgs.runCommandLocal "linux-firmware-framework" {} ''
       mkdir -p $out/lib/firmware
@@ -51,11 +52,10 @@
       done
       # iwlwifi ucode files are at the top level
       cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
-      # MediaTek MT7922 (RZ616) WiFi+BT — Framework 13 AMD board option
+      # MediaTek WiFi+BT — Framework 13 AMD (MT7922/RZ616, MT7925/RZ717)
       mkdir -p $out/lib/firmware/mediatek
-      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin $out/lib/firmware/mediatek/
-      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin $out/lib/firmware/mediatek/
-      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin $out/lib/firmware/mediatek/
+      cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/*MT7922* $out/lib/firmware/mediatek/
+      cp -rL ${pkgs.linux-firmware}/lib/firmware/mediatek/mt792? $out/lib/firmware/mediatek/
     '')
     pkgs.sof-firmware
   ];
