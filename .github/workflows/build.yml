@@ -8,34 +8,70 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-x86_64:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Build graphical ISO (x86_64)
+        run: nix build .#isoImageGraphical
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-x86_64
+          path: result/iso/*.iso
+
+  build-aarch64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Build minimal ISO (aarch64)
+        run: nix build .#isoImage-aarch64
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-aarch64
+          path: result/iso/*.iso
+
+  release:
+    needs: [build-x86_64, build-aarch64]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
 
-      - uses: DeterminateSystems/nix-installer-action@v21
+      - name: Download all ISO artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: isos
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v13
-
-      - name: Build
-        run: nix build .#isoImageGraphical
-
-      - name: Extract version from ISO filename
+      - name: Extract version and prepare files
         id: version
         run: |
-          ISO_PATH=$(ls result/iso/*.iso)
-          ISO_NAME=$(basename "$ISO_PATH")
-          # nixos-gnome-25.11.20250728.dc96378-x86_64-linux.iso -> 25.11.20250728.dc96378
-          VERSION=$(echo "$ISO_NAME" | sed 's/^nixos-gnome-//;s/-x86_64-linux\.iso$//')
+          X86_ISO=$(ls isos/iso-x86_64/*.iso)
+          VERSION=$(basename "$X86_ISO" | sed 's/^nixos-gnome-//;s/-x86_64-linux\.iso$//')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "iso_path=$ISO_PATH" >> "$GITHUB_OUTPUT"
+
+          mkdir -p release
+          cp isos/iso-x86_64/*.iso release/
+          cp isos/iso-aarch64/*.iso release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}-${{ github.run_number }}
           name: NixOS ${{ steps.version.outputs.version }} (build ${{ github.run_number }})
-          files: ${{ steps.version.outputs.iso_path }}
+          files: release/*.iso
           generate_release_notes: true
