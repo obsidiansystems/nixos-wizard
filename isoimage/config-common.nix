@@ -38,6 +38,7 @@ Run `\e[1;35mnixos-help\e[0m` for the NixOS manual.
   # ZFS support on the live ISO
   boot.supportedFilesystems = [ "zfs" ];
   boot.zfs.forceImportAll = true;
+  boot.zfs.forceImportRoot = true;
   networking.hostId = "00000000";
 
   # Passwordless sudo on the live ISO
