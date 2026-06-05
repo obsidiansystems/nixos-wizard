@@ -1,7 +1,7 @@
 { pkgs, lib, modulesPath, nixosWizard, ... }: {
   imports = [
     "${modulesPath}/installer/cd-dvd/installation-cd-graphical-gnome.nix"
-    ./config.nix
+    ./config-common.nix
   ];
 
   boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
