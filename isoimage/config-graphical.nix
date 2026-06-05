@@ -21,8 +21,8 @@
 
   environment.systemPackages = [ pkgs.gnome-terminal ];
 
-  services.gnome.tracker-miners.enable = false;
-  services.gnome.tracker.enable = false;
+  services.gnome.localsearch.enable = false;
+  services.gnome.tinysparql.enable = false;
   services.gnome.gnome-online-accounts.enable = false;
   services.gnome.evolution-data-server.enable = lib.mkForce false;
 
