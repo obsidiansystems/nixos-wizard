@@ -18,6 +18,8 @@
   documentation.enable = lib.mkForce false;
   services.speechd.enable = lib.mkForce false;
   services.samba.enable = lib.mkForce false;
+  hardware.enableRedistributableFirmware = lib.mkForce false;
+  hardware.wirelessRegulatoryDatabase = true;
 
   environment.systemPackages = [ pkgs.gnome-terminal ];
 
