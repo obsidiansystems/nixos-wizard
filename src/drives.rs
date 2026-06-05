@@ -7,6 +7,50 @@ use crate::widget::TableWidget;
 
 static NEXT_PART_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EncryptionType {
+  #[default]
+  None,
+  Luks,
+  ZfsNative,
+}
+
+#[derive(Clone, Debug)]
+pub struct AutoLayoutConfig {
+  pub fs_type: Option<String>,
+  pub encryption: EncryptionType,
+  pub esp_size_mb: u64,
+  pub swap_size_mb: u64,
+}
+
+impl Default for AutoLayoutConfig {
+  fn default() -> Self {
+    Self {
+      fs_type: None,
+      encryption: EncryptionType::None,
+      esp_size_mb: 4096,
+      swap_size_mb: detect_ram_mb(),
+    }
+  }
+}
+
+pub fn detect_ram_mb() -> u64 {
+  #[cfg(target_os = "linux")]
+  {
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+      for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+          let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+          if kb > 0 {
+            return kb / 1024;
+          }
+        }
+      }
+    }
+  }
+  8192
+}
+
 pub fn get_entry_id() -> u64 {
   NEXT_PART_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -387,6 +431,9 @@ pub struct Disk {
   /// Partitions use half-open ranges: [start, start+size)
   /// This means start sector is included, end sector is excluded
   layout: Vec<DiskItem>,
+
+  pub encryption: EncryptionType,
+  pub zpool_name: Option<String>,
 }
 
 impl Disk {
@@ -398,6 +445,8 @@ impl Disk {
       initial_layout: layout.clone(),
       total_used_sectors: 0,
       layout,
+      encryption: EncryptionType::None,
+      zpool_name: None,
     };
     new.calculate_free_space();
     new
@@ -441,26 +490,49 @@ impl Disk {
           self.size,
         );
 
-        if p.flags.contains(&"esp".to_string()) {
-          partitions.insert(
-            name,
-            serde_json::json!({
-              "size": size,
-              "type": p.fs_gpt_code(p.flags.contains(&"esp".to_string())),
-              "format": p.disko_fs_type(),
-              "mountpoint": p.mount_point(),
-            }),
-          );
+        let value = if p.fs_type() == Some("swap") {
+          serde_json::json!({
+            "size": size,
+            "content": { "type": "swap" }
+          })
+        } else if p.fs_type() == Some("zfs") && self.encryption == EncryptionType::Luks {
+          let pool = self.zpool_name.as_deref().unwrap_or("tank");
+          serde_json::json!({
+            "size": size,
+            "content": {
+              "type": "luks",
+              "name": "cryptroot",
+              "content": {
+                "type": "zfs",
+                "pool": pool
+              }
+            }
+          })
+        } else if p.fs_type() == Some("zfs") {
+          let pool = self.zpool_name.as_deref().unwrap_or("tank");
+          serde_json::json!({
+            "size": size,
+            "content": {
+              "type": "zfs",
+              "pool": pool
+            }
+          })
+        } else if p.flags.contains(&"esp".to_string()) {
+          serde_json::json!({
+            "size": size,
+            "type": p.fs_gpt_code(true),
+            "format": p.disko_fs_type(),
+            "mountpoint": p.mount_point(),
+          })
         } else {
-          partitions.insert(
-            name,
-            serde_json::json!({
-              "size": size,
-              "format": p.disko_fs_type(),
-              "mountpoint": p.mount_point(),
-            }),
-          );
-        }
+          serde_json::json!({
+            "size": size,
+            "format": p.disko_fs_type(),
+            "mountpoint": p.mount_point(),
+          })
+        };
+
+        partitions.insert(name, value);
         self.total_used_sectors += p.size();
       }
     }
@@ -474,6 +546,30 @@ impl Disk {
         "partitions": partitions
       }
     })
+  }
+
+  pub fn zpool_cfg(&self) -> Option<serde_json::Value> {
+    let pool_name = self.zpool_name.as_ref()?;
+    let mut root_fs_options = serde_json::Map::new();
+    root_fs_options.insert("compression".into(), serde_json::json!("zstd"));
+    root_fs_options.insert("mountpoint".into(), serde_json::json!("none"));
+
+    if self.encryption == EncryptionType::ZfsNative {
+      root_fs_options.insert("encryption".into(), serde_json::json!("aes-256-gcm"));
+      root_fs_options.insert("keyformat".into(), serde_json::json!("passphrase"));
+      root_fs_options.insert("keylocation".into(), serde_json::json!("prompt"));
+    }
+
+    Some(serde_json::json!({
+      "name": pool_name,
+      "type": "zpool",
+      "rootFsOptions": root_fs_options,
+      "datasets": {
+        "root": { "type": "zfs_fs", "mountpoint": "/" },
+        "home": { "type": "zfs_fs", "mountpoint": "/home" },
+        "nix":  { "type": "zfs_fs", "mountpoint": "/nix" }
+      }
+    }))
   }
   pub fn name(&self) -> &str {
     &self.name
@@ -711,48 +807,77 @@ impl Disk {
   /// - Remaining space for root filesystem (specified fs_type or default)
   ///
   /// All existing partitions are marked for deletion
-  pub fn use_default_layout(&mut self, fs_type: Option<String>) {
-    // Remove all free space and newly created partitions
-    // Keep existing partitions so user can see what will be deleted
+  pub fn use_default_layout(&mut self, config: AutoLayoutConfig) {
     self.layout.retain(|item| match item {
-      DiskItem::FreeSpace { .. } => false, // Remove all free space
-      DiskItem::Partition(part) => part.status != PartStatus::Create, // Remove created partitions
+      DiskItem::FreeSpace { .. } => false,
+      DiskItem::Partition(part) => part.status != PartStatus::Create,
     });
-    // Mark all existing partitions for deletion
     for part in self.layout.iter_mut() {
       let DiskItem::Partition(part) = part else {
         continue;
       };
       part.status = PartStatus::Delete
     }
-    // Create 500MB FAT32 boot partition starting at sector 2048 (1MB aligned)
-    // This serves as the EFI System Partition (ESP)
+
+    self.encryption = config.encryption.clone();
+    let uses_zfs = matches!(config.encryption, EncryptionType::Luks | EncryptionType::ZfsNative);
+    if uses_zfs {
+      self.zpool_name = Some("tank".into());
+    } else {
+      self.zpool_name = None;
+    }
+
     let boot_part = Partition::new(
-      2048,                                 // Start at 1MB boundary
-      mb_to_sectors(500, self.sector_size), // 500MB size
+      2048,
+      mb_to_sectors(config.esp_size_mb, self.sector_size),
       self.sector_size,
       PartStatus::Create,
       None,
-      Some("fat32".into()), // FAT32 filesystem
-      Some("/boot".into()), // Mount at /boot
-      Some("BOOT".into()),  // Partition label
+      Some("fat32".into()),
+      Some("/boot".into()),
+      Some("ESP".into()),
       false,
-      vec!["boot".into(), "esp".into()], // Mark as bootable ESP
+      vec!["boot".into(), "esp".into()],
     );
-    // Create root partition using all remaining space
+
+    let mut cursor = boot_part.end();
+
+    if config.swap_size_mb > 0 {
+      let swap_part = Partition::new(
+        cursor,
+        mb_to_sectors(config.swap_size_mb, self.sector_size),
+        self.sector_size,
+        PartStatus::Create,
+        None,
+        Some("swap".into()),
+        None,
+        Some("SWAP".into()),
+        false,
+        vec![],
+      );
+      cursor = swap_part.end();
+      self.layout.push(DiskItem::Partition(swap_part));
+    }
+
+    let root_fs = if uses_zfs {
+      Some("zfs".into())
+    } else {
+      config.fs_type
+    };
+
     let root_part = Partition::new(
-      boot_part.end(),               // Start immediately after boot partition
-      self.size - (boot_part.end()), // Use all remaining disk space
+      cursor,
+      self.size - cursor,
       self.sector_size,
       PartStatus::Create,
       None,
-      fs_type,             // User-specified or default filesystem
-      Some("/".into()),    // Mount as root filesystem
-      Some("ROOT".into()), // Partition label
+      root_fs,
+      if uses_zfs { None } else { Some("/".into()) },
+      Some("ROOT".into()),
       false,
-      vec![], // No special flags
+      vec![],
     );
-    // Add the new partitions to the layout
+
     self.layout.push(DiskItem::Partition(boot_part));
     self.layout.push(DiskItem::Partition(root_part));
   }

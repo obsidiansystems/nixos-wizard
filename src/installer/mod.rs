@@ -20,7 +20,7 @@ use tempfile::NamedTempFile;
 
 use crate::{
   command,
-  drives::{Disk, DiskConfig, part_table_multi},
+  drives::{Disk, DiskConfig, EncryptionType, part_table_multi},
   installer::{systempkgs::get_available_pkgs, users::User},
   nixgen::highlight_nix,
   split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_left, ui_right,
@@ -89,6 +89,7 @@ pub struct Installer {
   pub drives: Vec<Disk>,
 
   pub disk_config: DiskConfig,
+  pub encryption: EncryptionType,
   pub use_auto_disk_config: bool,
   /// Scratch space for the drive currently being edited by partition pages.
   /// Gets upserted into disk_config when the user confirms.
@@ -134,22 +135,25 @@ impl Installer {
       "ssh_config": self.ssh_config,
       "system_pkgs": self.system_pkgs,
       "users": self.users,
-      "kernels": self.kernels
+      "kernels": self.kernels,
+      "encryption": format!("{:?}", self.encryption)
     });
 
-    // drive configuration - collect disko configs from all configured drives
-    let disko_cfgs: Vec<serde_json::Value> = self
-      .disk_config
-      .disks_mut()
-      .map(|d| d.as_disko_cfg())
-      .collect();
+    let mut disko_cfgs: Vec<serde_json::Value> = Vec::new();
+    let mut zpool_cfgs: Vec<serde_json::Value> = Vec::new();
+    for d in self.disk_config.disks_mut() {
+      disko_cfgs.push(d.as_disko_cfg());
+      if let Some(zpool) = d.zpool_cfg() {
+        zpool_cfgs.push(zpool);
+      }
+    }
 
-    // flake configuration if using flakes
     let flake_path = self.flake_path.clone();
 
     let config = serde_json::json!({
       "config": sys_config,
       "disko": disko_cfgs,
+      "zpools": zpool_cfgs,
       "flake_path": flake_path,
     });
 

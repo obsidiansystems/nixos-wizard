@@ -106,8 +106,9 @@ impl NixWriter {
   pub fn write_configs(&self) -> anyhow::Result<Configs> {
     // Generate disko (disk partitioning) configuration
     let disko = {
-      let config = self.config["disko"].clone();
-      self.write_disko_config(config)?
+      let disks = &self.config["disko"];
+      let zpools = &self.config["zpools"];
+      self.write_disko_config(disks, zpools)?
     };
 
     // Generate NixOS system configuration
@@ -174,6 +175,10 @@ impl NixWriter {
         "system_pkgs" => value.as_array().map(Self::parse_system_packages),
         "timezone" => value.as_str().map(Self::parse_timezone),
         "use_swap" => value.as_bool().filter(|&b| b).map(|_| Self::parse_swap()),
+        "encryption" => value.as_str().and_then(|enc| match enc {
+          "Luks" | "ZfsNative" => Some(Self::parse_zfs_boot_config()),
+          _ => None,
+        }),
         "users" => {
           // Parse user configurations and check if home-manager is needed
           let users: Vec<User> = serde_json::from_value(value.clone())?;
@@ -238,20 +243,18 @@ impl NixWriter {
   /// Generate Disko configuration for disk partitioning
   ///
   /// Converts the disk layout into Disko's declarative partition format
-  pub fn write_disko_config(&self, config: Value) -> anyhow::Result<String> {
-    log::debug!("Writing Disko config: {config}");
+  pub fn write_disko_config(&self, disko_config: &Value, zpools_config: &Value) -> anyhow::Result<String> {
+    log::debug!("Writing Disko config: {disko_config}");
 
-    let disks = config
+    let disks = disko_config
       .as_array()
       .ok_or_else(|| anyhow::anyhow!("Expected disko config to be an array of disk configs"))?;
 
-    let mut disk_attrs = Vec::new();
+    let mut attrs = Vec::new();
     for disk in disks {
       let device = disk["device"].as_str().unwrap_or("/dev/sda");
       let disk_type = disk["type"].as_str().unwrap_or("disk");
       let content = Self::parse_disko_content(&disk["content"])?;
-
-      // Derive a disko-friendly name from the device path (e.g. /dev/nvme0n1 -> nvme0n1)
       let disk_name = device.rsplit('/').next().unwrap_or("main");
 
       let disko_config = attrset! {
@@ -260,10 +263,49 @@ impl NixWriter {
         "content" = content;
       };
 
-      disk_attrs.push(format!("disko.devices.disk.{disk_name} = {disko_config};"));
+      attrs.push(format!("disko.devices.disk.{disk_name} = {disko_config};"));
     }
 
-    let raw = format!("{{ {} }}", disk_attrs.join(" "));
+    if let Some(zpools) = zpools_config.as_array() {
+      for zpool in zpools {
+        let pool_name = zpool["name"].as_str().unwrap_or("tank");
+        let pool_type = zpool["type"].as_str().unwrap_or("zpool");
+
+        let mut root_fs_opts = Vec::new();
+        if let Some(opts) = zpool["rootFsOptions"].as_object() {
+          for (k, v) in opts {
+            if let Some(s) = v.as_str() {
+              root_fs_opts.push(format!("{k} = {};", nixstr(s)));
+            }
+          }
+        }
+        let root_fs_options_attr = format!("{{ {} }}", root_fs_opts.join(" "));
+
+        let mut dataset_attrs = Vec::new();
+        if let Some(datasets) = zpool["datasets"].as_object() {
+          for (name, ds) in datasets {
+            let ds_type = ds["type"].as_str().unwrap_or("zfs_fs");
+            let ds_mountpoint = ds["mountpoint"].as_str().unwrap_or("/");
+            let ds_attr = attrset! {
+              "type" = nixstr(ds_type);
+              mountpoint = nixstr(ds_mountpoint);
+            };
+            dataset_attrs.push(format!("{} = {};", nixstr(name), ds_attr));
+          }
+        }
+        let datasets_attr = format!("{{ {} }}", dataset_attrs.join(" "));
+
+        let pool_config = attrset! {
+          "type" = nixstr(pool_type);
+          "rootFsOptions" = root_fs_options_attr;
+          "datasets" = datasets_attr;
+        };
+
+        attrs.push(format!("disko.devices.zpool.{pool_name} = {pool_config};"));
+      }
+    }
+
+    let raw = format!("{{ {} }}", attrs.join(" "));
     fmt_nix(raw)
   }
 
@@ -306,15 +348,57 @@ impl NixWriter {
   }
 
   fn parse_partition(partition: &Value) -> anyhow::Result<String> {
+    let size = partition["size"]
+      .as_str()
+      .ok_or_else(|| anyhow::anyhow!("Missing required 'size' field in partition"))?;
+
+    if let Some(content) = partition.get("content") {
+      match content.get("type").and_then(|v| v.as_str()) {
+        Some("luks") => {
+          let luks_name = content["name"].as_str().unwrap_or("cryptroot");
+          let inner = &content["content"];
+          let inner_type = inner["type"].as_str().unwrap_or("zfs");
+          let pool = inner["pool"].as_str().unwrap_or("tank");
+          return Ok(attrset! {
+            size = nixstr(size);
+            content = attrset! {
+              type = nixstr("luks");
+              name = nixstr(luks_name);
+              content = attrset! {
+                type = nixstr(inner_type);
+                pool = nixstr(pool);
+              };
+            };
+          });
+        }
+        Some("zfs") => {
+          let pool = content["pool"].as_str().unwrap_or("tank");
+          return Ok(attrset! {
+            size = nixstr(size);
+            content = attrset! {
+              type = nixstr("zfs");
+              pool = nixstr(pool);
+            };
+          });
+        }
+        Some("swap") => {
+          return Ok(attrset! {
+            size = nixstr(size);
+            content = attrset! {
+              type = nixstr("swap");
+            };
+          });
+        }
+        _ => {}
+      }
+    }
+
     let format = partition["format"]
       .as_str()
       .ok_or_else(|| anyhow::anyhow!("Missing required 'format' field in partition"))?;
     let mountpoint = partition["mountpoint"]
       .as_str()
       .ok_or_else(|| anyhow::anyhow!("Missing required 'mountpoint' field in partition"))?;
-    let size = partition["size"]
-      .as_str()
-      .ok_or_else(|| anyhow::anyhow!("Missing required 'size' field in partition"))?;
     let part_type = partition.get("type").and_then(|v| v.as_str());
     log::debug!(
       "Parsing partition: format={format}, mountpoint={mountpoint}, size={size}, type={part_type:?}"
@@ -670,5 +754,33 @@ impl NixWriter {
     attrset! {
       "swapDevices" = "[ { device = \"/swapfile\"; size = 4096; } ]";
     }
+  }
+
+  fn parse_zfs_boot_config() -> String {
+    let host_id = Self::generate_host_id();
+    let host_id_nix = nixstr(&host_id);
+    let a = attrset! {
+      "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
+      "boot.zfs.forceImportAll" = true;
+      "networking.hostId" = host_id_nix;
+    };
+    let b = attrset! {
+      "boot.initrd.supportedFilesystems" = r#"[ "zfs" ]"#;
+    };
+    merge_attrs!(a, b)
+  }
+
+  fn generate_host_id() -> String {
+    if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
+      let trimmed = id.trim();
+      if trimmed.len() >= 8 {
+        return trimmed[..8].to_string();
+      }
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
   }
 }
