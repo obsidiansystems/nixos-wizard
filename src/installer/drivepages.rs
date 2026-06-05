@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use crate::{
   drives::{
-    DiskConfig, DiskItem, PartStatus, Partition, bytes_readable, disk_table, lsblk, parse_sectors,
-    part_table, part_table_multi,
+    AutoLayoutConfig, DiskConfig, DiskItem, EncryptionType, PartStatus, Partition,
+    bytes_readable, disk_table, lsblk, parse_sectors, part_table, part_table_multi,
   },
   installer::{Installer, Page, Signal},
   split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_up,
@@ -476,7 +476,7 @@ impl Page for SelectDrive {
 
               installer.editing_drive = Some(editing);
               if installer.use_auto_disk_config {
-                Signal::Push(Box::new(SelectFilesystem::new(None)))
+                Signal::Push(Box::new(SelectEncryption::new()))
               } else {
                 let Some(ref drive) = installer.editing_drive else {
                   return Signal::Error(anyhow::anyhow!("No drive config available"));
@@ -567,6 +567,202 @@ impl Page for SelectDrive {
       ],
     ]);
     ("Select Drive".to_string(), help_content)
+  }
+}
+
+pub struct SelectEncryption {
+  buttons: WidgetBox,
+  help_modal: HelpModal<'static>,
+  god_mode: bool,
+  input_buffer: String,
+}
+
+impl SelectEncryption {
+  pub fn new() -> Self {
+    let buttons = vec![
+      Box::new(Button::new("LUKS (Full Disk Encryption)")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("Back")) as Box<dyn ConfigWidget>,
+    ];
+    let mut button_row = WidgetBox::button_menu(buttons);
+    button_row.focus();
+    let help_content = styled_block(vec![
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
+        (None, " - Navigate options"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+        (None, " - Select encryption method"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+        (None, " - Return to previous menu"),
+      ],
+    ]);
+    let help_modal = HelpModal::new("Disk Encryption", help_content);
+    Self {
+      buttons: button_row,
+      help_modal,
+      god_mode: false,
+      input_buffer: String::new(),
+    }
+  }
+
+  fn unlock_god_mode(&mut self) {
+    self.god_mode = true;
+    self.buttons = WidgetBox::button_menu(vec![
+      Box::new(Button::new("LUKS (Full Disk Encryption)")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("ZFS Native Encryption")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("None (no encryption)")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("Back")) as Box<dyn ConfigWidget>,
+    ]);
+    self.buttons.focus();
+  }
+}
+
+impl Page for SelectEncryption {
+  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(60), Constraint::Percentage(40)]
+    );
+
+    let info_box = InfoBox::new(
+      "Disk Encryption",
+      styled_block(vec![
+        vec![
+          (None, "Select the encryption method for your installation."),
+        ],
+        vec![(None, "")],
+        vec![
+          (None, "LUKS provides "),
+          (HIGHLIGHT, "full disk encryption"),
+          (None, " with strong metadata protection. Your data is encrypted at rest and requires a passphrase at boot."),
+        ],
+        vec![(None, "")],
+        vec![
+          (None, "The disk layout will be: "),
+          (HIGHLIGHT, "4 GB ESP"),
+          (None, " + "),
+          (HIGHLIGHT, "swap (matching RAM)"),
+          (None, " + "),
+          (HIGHLIGHT, "LUKS → ZFS"),
+          (None, " (remaining space)"),
+        ],
+      ]),
+    );
+    info_box.render(f, chunks[0]);
+    self.buttons.render(f, chunks[1]);
+    self.help_modal.render(f, area);
+  }
+
+  fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
+    if let KeyCode::Char(c) = event.code {
+      self.input_buffer.push(c);
+      if self.input_buffer.len() > 5 {
+        self.input_buffer.drain(..self.input_buffer.len() - 5);
+      }
+      if self.input_buffer.ends_with("iddqd") && !self.god_mode {
+        self.unlock_god_mode();
+        return Signal::Wait;
+      }
+    }
+
+    match event.code {
+      KeyCode::Char('?') => {
+        self.help_modal.toggle();
+        Signal::Wait
+      }
+      ui_close!() if self.help_modal.visible => {
+        self.help_modal.hide();
+        Signal::Wait
+      }
+      _ if self.help_modal.visible => Signal::Wait,
+      ui_back!() => Signal::Pop,
+      ui_up!() => {
+        self.buttons.prev_child();
+        Signal::Wait
+      }
+      ui_down!() => {
+        self.buttons.next_child();
+        Signal::Wait
+      }
+      ui_enter!() => {
+        let Some(idx) = self.buttons.selected_child() else {
+          return Signal::Wait;
+        };
+
+        if self.god_mode {
+          match idx {
+            0 => {
+              // LUKS
+              installer.encryption = EncryptionType::Luks;
+              if let Some(config) = installer.editing_drive.as_mut() {
+                config.use_default_layout(AutoLayoutConfig {
+                  encryption: EncryptionType::Luks,
+                  ..Default::default()
+                });
+              }
+              Signal::Pop
+            }
+            1 => {
+              // ZFS Native
+              installer.encryption = EncryptionType::ZfsNative;
+              if let Some(config) = installer.editing_drive.as_mut() {
+                config.use_default_layout(AutoLayoutConfig {
+                  encryption: EncryptionType::ZfsNative,
+                  ..Default::default()
+                });
+              }
+              Signal::Pop
+            }
+            2 => {
+              // None — push to SelectFilesystem for traditional fs choice
+              installer.encryption = EncryptionType::None;
+              Signal::Push(Box::new(SelectFilesystem::new(None)))
+            }
+            3 => Signal::Pop,
+            _ => Signal::Wait,
+          }
+        } else {
+          match idx {
+            0 => {
+              // LUKS
+              installer.encryption = EncryptionType::Luks;
+              if let Some(config) = installer.editing_drive.as_mut() {
+                config.use_default_layout(AutoLayoutConfig {
+                  encryption: EncryptionType::Luks,
+                  ..Default::default()
+                });
+              }
+              Signal::Pop
+            }
+            1 => Signal::Pop,
+            _ => Signal::Wait,
+          }
+        }
+      }
+      _ => Signal::Wait,
+    }
+  }
+
+  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
+    let help_content = styled_block(vec![
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
+        (None, " - Navigate encryption options"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+        (None, " - Select encryption method"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+        (None, " - Return to previous menu"),
+      ],
+    ]);
+    ("Disk Encryption".to_string(), help_content)
   }
 }
 
@@ -969,7 +1165,10 @@ impl Page for SelectFilesystem {
 
         if installer.use_auto_disk_config {
           if let Some(config) = installer.editing_drive.as_mut() {
-            config.use_default_layout(Some(fs));
+            config.use_default_layout(crate::drives::AutoLayoutConfig {
+              fs_type: Some(fs),
+              ..Default::default()
+            });
           }
           // Pop back to SelectDrive so it can commit the editing_drive
           return Signal::Pop;
@@ -1442,7 +1641,7 @@ impl Page for SuggestPartition {
           0 => {
             // Yes
             if let Some(ref mut config) = installer.editing_drive {
-              config.use_default_layout(Some("ext4".into()));
+              config.use_default_layout(crate::drives::AutoLayoutConfig::default());
             } else {
               return Signal::Error(anyhow::anyhow!(
                 "No drive config available for suggested partition layout"
