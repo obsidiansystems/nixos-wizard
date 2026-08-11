@@ -67,15 +67,15 @@
       };
 
       # aarch64
-      installerIso-aarch64 = mkIso {
+      installerIsoGraphical-aarch64 = mkIso {
         targetSystem = "aarch64-linux";
-        modules = [ ./isoimage/config.nix ];
+        modules = [ ./isoimage/config-graphical.nix ];
       };
     };
 
     isoImage = nixosConfigurations.installerIso.config.system.build.isoImage;
     isoImageGraphical = nixosConfigurations.installerIsoGraphical.config.system.build.isoImage;
-    isoImage-aarch64 = nixosConfigurations.installerIso-aarch64.config.system.build.isoImage;
+    isoImageGraphical-aarch64 = nixosConfigurations.installerIsoGraphical-aarch64.config.system.build.isoImage;
 
     packages.${devSystem} = {
       default = mkNixosWizard devSystem;
