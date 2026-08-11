@@ -4,7 +4,7 @@
     ./config-common.nix
   ];
 
-  boot.kernelPackages = lib.mkForce pkgs.zfs.latestCompatibleLinuxPackages;
+  boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
 
   environment.gnome.excludePackages = with pkgs; [
     gnome-tour orca gnome-maps gnome-music gnome-weather

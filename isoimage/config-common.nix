@@ -30,7 +30,7 @@ Run `\e[1;35mnixos-help\e[0m` for the NixOS manual.
   '';
 
   environment.systemPackages = [
-    pkgs.nixfmt-rfc-style
+    pkgs.nixfmt
     nixosWizard
   ];
 

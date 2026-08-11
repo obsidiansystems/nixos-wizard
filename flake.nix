@@ -27,8 +27,7 @@
         --prefix PATH : ${pkgs.lib.makeBinPath [
           diskoPkg
           pkgs.bat
-          pkgs.nixfmt-rfc-style
-          pkgs.nixfmt-classic
+          pkgs.nixfmt
           pkgs.util-linux
           pkgs.gawk
           pkgs.gnugrep
