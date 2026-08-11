@@ -4,8 +4,7 @@
     ./config-common.nix
   ];
 
-  # LTS kernel
-  boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
+  boot.kernelPackages = lib.mkForce pkgs.zfs.latestCompatibleLinuxPackages;
 
   # Trim ISO size — exclude GNOME apps not needed for the installer
   environment.gnome.excludePackages = with pkgs; [
@@ -41,24 +40,27 @@
   # Disable TTS/speech to save ~300MB (mbrola-voices, flite, speechd)
   services.speechd.enable = lib.mkForce false;
 
-  # Trimmed firmware — only AMD GPU, AMD microcode, Intel WiFi/BT (Framework laptop)
-  hardware.enableRedistributableFirmware = lib.mkForce false;
   hardware.wirelessRegulatoryDatabase = true;
-  hardware.firmware = lib.mkForce [
+  # x86_64: trim firmware for the Framework 13 lineup
+  # AMD: amdgpu, amd (microcode), MediaTek WiFi+BT
+  # Intel Core Ultra 1 (Meteor Lake): i915 (Arc Graphics), intel (VPU, BT), iwlwifi (AX210)
+  # (aarch64 falls back to the default redistributable set)
+  hardware.enableRedistributableFirmware = lib.mkIf pkgs.stdenv.hostPlatform.isx86_64 (lib.mkForce false);
+  hardware.firmware = lib.mkIf pkgs.stdenv.hostPlatform.isx86_64 (lib.mkForce [
     (pkgs.runCommandLocal "linux-firmware-framework" {} ''
       mkdir -p $out/lib/firmware
-      for dir in amdgpu amd intel; do
+      for dir in amdgpu amd intel i915; do
         cp -rL ${pkgs.linux-firmware}/lib/firmware/$dir $out/lib/firmware/
       done
       # iwlwifi ucode files are at the top level
       cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
-      # MediaTek WiFi+BT — Framework 13 AMD (MT7922/RZ616, MT7925/RZ717)
+      # MediaTek WiFi+BT — Framework 13 AMD (RZ616/MT7922, RZ717/MT7925)
       mkdir -p $out/lib/firmware/mediatek
       cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/*MT7922* $out/lib/firmware/mediatek/
       cp -rL ${pkgs.linux-firmware}/lib/firmware/mediatek/mt792? $out/lib/firmware/mediatek/
     '')
     pkgs.sof-firmware
-  ];
+  ]);
 
   # Disable Samba file sharing
   services.samba.enable = lib.mkForce false;
