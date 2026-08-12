@@ -458,7 +458,8 @@ impl NixWriter {
     let imports = format!("{{imports = [ {imports_str} ];}}" );
 
     let state_version = attrset! {
-      "system.stateVersion" = nixstr("25.11");
+      "system.stateVersion" = nixstr("26.11");
+      "boot.plymouth.enable" = false;
     };
 
     let zfs_native = self.config["zfs_native_encryption"].as_bool().unwrap_or(false);
@@ -518,8 +519,8 @@ impl NixWriter {
         services.fwupd.enable = true;
 
         # Disable Tracker file indexing — causes heavy I/O on login
-        services.gnome.tracker-miners.enable = false;
-        services.gnome.tracker.enable = false;
+        services.gnome.localsearch.enable = false;
+        services.gnome.tinysparql.enable = false;
 
         # Direnv for automatic nix shell activation
         programs.direnv.enable = true;
