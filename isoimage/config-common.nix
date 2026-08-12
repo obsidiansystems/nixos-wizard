@@ -1,4 +1,4 @@
-{ pkgs, nixosWizard, ... }: {
+{ pkgs, lib, nixosWizard, ... }: {
   environment.etc."issue".text = ''
                                     \e[92m<<< NixOS 25.11.20250728.dc96378 \r (\m) - \l >>>\e[0m
 
@@ -47,5 +47,5 @@ Run `\e[1;35mnixos-help\e[0m` for the NixOS manual.
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   networking.networkmanager.enable = true;
-  boot.plymouth.enable = false;
+  boot.plymouth.enable = lib.mkForce false;
 }
