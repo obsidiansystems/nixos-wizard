@@ -16,3 +16,17 @@ fi
 VERSION="${NixOS_VERSION}-${GITHUB_RUN_NUMBER:-0}"
 echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 echo "NIXOS_VERSION=$NixOS_VERSION" >> "$GITHUB_ENV"
+
+# Generate changelog from commits since last release tag
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if [[ -n "$PREV_TAG" ]]; then
+  CHANGELOG=$(git log --oneline "${PREV_TAG}..HEAD" --format="- %s")
+else
+  CHANGELOG=$(git log --oneline -20 --format="- %s")
+fi
+
+{
+  echo 'CHANGELOG<<CHANGELOG_EOF'
+  echo "$CHANGELOG"
+  echo 'CHANGELOG_EOF'
+} >> "$GITHUB_ENV"

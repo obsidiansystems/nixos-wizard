@@ -8,6 +8,7 @@
     disko.url = "github:nix-community/disko/latest";
     disko.inputs.nixpkgs.follows = "nixpkgs";
     nixos-hardware.url = "github:NixOS/nixos-hardware/master";
+    nixos-hardware.inputs.nixpkgs.follows = "nixpkgs";
     gather-linux.url = "github:simonkoeck/gather-linux";
     gather-linux.inputs.nixpkgs.follows = "nixpkgs";
   };

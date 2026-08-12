@@ -45,5 +45,5 @@ jobs:
         with:
           tag_name: v${{ env.VERSION }}
           name: NixOS ${{ env.NIXOS_VERSION }} (build ${{ github.run_number }})
+          body: ${{ env.CHANGELOG }}
           files: release/*
-          generate_release_notes: true

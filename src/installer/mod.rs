@@ -648,6 +648,12 @@ impl Menu {
     if installer.bootloader.is_none() {
       lines.push(vec![(Some((Color::Red, Modifier::BOLD)), " - Bootloader")]);
     }
+    if installer.encryption_password.is_none() {
+      lines.push(vec![(
+        Some((Color::Red, Modifier::BOLD)),
+        " - Disk Encryption Password",
+      )]);
+    }
     if lines.is_empty() {
       lines.push(vec![(
         Some((Color::Green, Modifier::BOLD)),

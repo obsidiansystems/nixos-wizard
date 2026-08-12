@@ -103,10 +103,14 @@ struct InputLock {
 /// The flake.lock from this repo, embedded at compile time
 const UPSTREAM_FLAKE_LOCK: &str = include_str!("../flake.lock");
 
-/// Parse lock info for any input node from the embedded flake.lock
-fn parse_input_lock(node_name: &str) -> Option<InputLock> {
+/// Parse lock info for any input node from the embedded flake.lock.
+/// Follows root input indirection (e.g. root.inputs.nixpkgs = "nixpkgs_2").
+fn parse_input_lock(input_name: &str) -> Option<InputLock> {
   let lock: Value = serde_json::from_str(UPSTREAM_FLAKE_LOCK).ok()?;
-  let locked = &lock["nodes"][node_name]["locked"];
+  let resolved = lock["nodes"]["root"]["inputs"][input_name]
+    .as_str()
+    .unwrap_or(input_name);
+  let locked = &lock["nodes"][resolved]["locked"];
   Some(InputLock {
     owner: locked["owner"].as_str()?.to_string(),
     repo: locked["repo"].as_str()?.to_string(),
