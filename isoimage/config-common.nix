@@ -47,5 +47,5 @@ Run `\e[1;35mnixos-help\e[0m` for the NixOS manual.
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   networking.networkmanager.enable = true;
-  boot.plymouth.enable = true;
+  boot.plymouth.enable = false;
 }
