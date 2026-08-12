@@ -512,7 +512,7 @@ impl NixWriter {
     let raw = r#"
       # extras.nix — opinionated defaults bundled by nixos-wizard.
       # These are not user choices — edit or remove as you see fit.
-      { config, pkgs, gather-linux, ... }: {
+      { config, pkgs, lib, gather-linux, ... }: {
 
         # Firmware update daemon
         services.fwupd.enable = true;
@@ -533,15 +533,16 @@ impl NixWriter {
         # Default apps
         environment.systemPackages = (with pkgs; [
           firefox
-          slack
-          zoom-us
           vscode
           git
           gh
           gnome-firmware
+        ]) ++ lib.optionals pkgs.stdenv.hostPlatform.isx86_64 ((with pkgs; [
+          slack
+          zoom-us
         ]) ++ [
           gather-linux.packages.${pkgs.system}.default
-        ];
+        ]);
 
         # Suppress Firefox first-run pages and default browser prompt
         programs.firefox = {
