@@ -17,8 +17,10 @@ pub fn nixstr(val: impl ToString) -> String {
 pub fn fmt_nix(nix: String) -> anyhow::Result<String> {
   // Spawn nixfmt process with piped input/output for formatting
   let mut nixfmt_child = Command::new("nixfmt")
+    .arg("-")
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()?;
 
   // Send the unformatted Nix code to nixfmt's stdin
@@ -711,11 +713,13 @@ impl NixWriter {
         let pool = inner["pool"]
           .as_str()
           .ok_or_else(|| anyhow::anyhow!("LUKS-ZFS partition missing 'pool'"))?;
+        let password_file = content["passwordFile"].as_str().unwrap_or("/tmp/disk.key");
         return Ok(attrset! {
           size = nixstr(size);
           content = attrset! {
             type = nixstr("luks");
             name = nixstr(luks_name);
+            passwordFile = nixstr(password_file);
             content = attrset! {
               type = nixstr("zfs");
               pool = nixstr(pool);
