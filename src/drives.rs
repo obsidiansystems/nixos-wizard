@@ -454,6 +454,7 @@ impl Disk {
               "content": {
                 "type": "luks",
                 "name": format!("crypt{pool}"),
+                "passwordFile": "/tmp/disk.key",
                 "content": {
                   "type": "zfs",
                   "pool": pool,
@@ -764,7 +765,14 @@ impl Disk {
   /// - Remaining space for root filesystem (specified fs_type or default)
   ///
   /// All existing partitions are marked for deletion
-  pub fn use_default_layout(&mut self, _fs_type: Option<String>) {
+  /// Apply the default NixOS partitioning scheme to this disk
+  ///
+  /// Creates a standard two-partition layout:
+  /// - 1GB FAT32 boot partition (ESP) at the beginning
+  /// - Remaining space for root filesystem (default: luks-zfs, or plain zfs with --native-zfs-encryption)
+  ///
+  /// All existing partitions are marked for deletion
+  pub fn use_default_layout(&mut self, fs_type: Option<String>) {
     // Remove all free space and newly created partitions
     // Keep existing partitions so user can see what will be deleted
     self.layout.retain(|item| match item {
@@ -792,14 +800,14 @@ impl Disk {
       vec!["boot".into(), "esp".into()],
     );
     // Remaining space for ZFS pool "tank"
-    // TODO: Add LUKS encryption once passphrase handling is implemented
+    let zfs_type = fs_type.unwrap_or_else(|| "luks-zfs".into());
     let zfs_part = Partition::new(
       boot_part.end(),
       self.size - boot_part.end(),
       self.sector_size,
       PartStatus::Create,
       None,
-      Some("zfs".into()),
+      Some(zfs_type),
       None,
       Some("tank".into()),
       false,

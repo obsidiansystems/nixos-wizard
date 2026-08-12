@@ -2,7 +2,7 @@
   description = "Nixos TUI Installer";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko/latest";
@@ -32,8 +32,7 @@
         --prefix PATH : ${pkgs.lib.makeBinPath [
           diskoPkg
           pkgs.bat
-          pkgs.nixfmt-rfc-style
-          pkgs.nixfmt-classic
+          pkgs.nixfmt
           pkgs.util-linux
           pkgs.gawk
           pkgs.gnugrep
@@ -49,53 +48,44 @@
         { nixpkgs.hostPlatform = targetSystem; }
       ];
     };
-
-    devSystem = "x86_64-linux";
-    mkRustToolchain = fenix.packages.${devSystem}.complete.withComponents;
-    devPkgs = import nixpkgs { system = devSystem; };
   in
   rec {
     nixosConfigurations = {
-      # x86_64
-      installerIso = mkIso {
+      "installerIso-x86_64" = mkIso {
         targetSystem = "x86_64-linux";
         modules = [ ./isoimage/config.nix ];
       };
-      installerIsoGraphical = mkIso {
+      "installerIso-aarch64" = mkIso {
+        targetSystem = "aarch64-linux";
+        modules = [ ./isoimage/config.nix ];
+      };
+      "installerIsoGraphical-x86_64" = mkIso {
         targetSystem = "x86_64-linux";
         modules = [ ./isoimage/config-graphical.nix ];
       };
-
-      # aarch64
-      installerIsoGraphical-aarch64 = mkIso {
+      "installerIsoGraphical-aarch64" = mkIso {
         targetSystem = "aarch64-linux";
         modules = [ ./isoimage/config-graphical.nix ];
       };
     };
 
-    isoImage = nixosConfigurations.installerIso.config.system.build.isoImage;
-    isoImageGraphical = nixosConfigurations.installerIsoGraphical.config.system.build.isoImage;
-    isoImageGraphical-aarch64 = nixosConfigurations.installerIsoGraphical-aarch64.config.system.build.isoImage;
+    isoImage-x86_64 = nixosConfigurations."installerIso-x86_64".config.system.build.isoImage;
+    isoImage-aarch64 = nixosConfigurations."installerIso-aarch64".config.system.build.isoImage;
+    isoImageGraphical-x86_64 = nixosConfigurations."installerIsoGraphical-x86_64".config.system.build.isoImage;
+    isoImageGraphical-aarch64 = nixosConfigurations."installerIsoGraphical-aarch64".config.system.build.isoImage;
 
-    packages.${devSystem} = {
-      default = mkNixosWizard devSystem;
-    };
+    packages.x86_64-linux.default = mkNixosWizard "x86_64-linux";
+    packages.aarch64-linux.default = mkNixosWizard "aarch64-linux";
 
-    devShells.${devSystem}.default = let
-      toolchain = mkRustToolchain [
-        "cargo"
-        "clippy"
-        "rustfmt"
-        "rustc"
+    devShells = nixpkgs.lib.genAttrs (builtins.attrNames fenix.packages) (devSystem: let
+      devPkgs = import nixpkgs { system = devSystem; };
+      toolchain = fenix.packages.${devSystem}.complete.withComponents [
+        "cargo" "clippy" "rustfmt" "rustc"
       ];
-    in
-      devPkgs.mkShell {
+    in {
+      default = devPkgs.mkShell {
         packages = [ toolchain devPkgs.rust-analyzer ];
-
-        shellHook = ''
-          export SHELL=${devPkgs.zsh}/bin/zsh
-          exec ${devPkgs.zsh}/bin/zsh
-        '';
       };
+    });
   };
 }

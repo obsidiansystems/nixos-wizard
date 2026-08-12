@@ -455,12 +455,20 @@ impl NixWriter {
       "system.stateVersion" = nixstr("25.11");
     };
 
-    // ZFS boot support — always enabled since ZFS is the only filesystem
-    let zfs_boot = attrset! {
-      "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
-      "boot.zfs.extraPools" = r#"[ "tank" ]"#;
-      "boot.zfs.forceImportAll" = true;
-      "boot.zfs.requestEncryptionCredentials" = r#"[ "tank" ]"#;
+    let zfs_native = self.config["zfs_native_encryption"].as_bool().unwrap_or(false);
+    let zfs_boot = if zfs_native {
+      attrset! {
+        "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
+        "boot.zfs.extraPools" = r#"[ "tank" ]"#;
+        "boot.zfs.forceImportAll" = true;
+        "boot.zfs.requestEncryptionCredentials" = r#"[ "tank" ]"#;
+      }
+    } else {
+      attrset! {
+        "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
+        "boot.zfs.extraPools" = r#"[ "tank" ]"#;
+        "boot.zfs.forceImportAll" = true;
+      }
     };
 
     cfg_attrs = merge_attrs!(imports, cfg_attrs, state_version, zfs_boot);

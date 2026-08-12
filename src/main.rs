@@ -126,8 +126,9 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let dry_run = env::args().any(|arg| arg == "--dry-run");
-    debug!("Running TUI (dry_run={dry_run})");
-    run_app(&mut terminal, dry_run)
+    let native_zfs = env::args().any(|arg| arg == "--native-zfs-encryption");
+    debug!("Running TUI (dry_run={dry_run}, native_zfs={native_zfs})");
+    run_app(&mut terminal, dry_run, native_zfs)
   };
 
   debug!("Exiting TUI");
@@ -239,9 +240,13 @@ fn handle_signal(
 pub fn run_app(
   terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
   dry_run: bool,
+  native_zfs: bool,
 ) -> anyhow::Result<()> {
   let mut installer = Installer::new();
   installer.dry_run = dry_run;
+  if native_zfs {
+    installer.encryption_type = crate::installer::EncryptionType::ZfsNative;
+  }
   let mut page_stack: Vec<Box<dyn Page>> = vec![];
   page_stack.push(Box::new(Menu::new()));
 

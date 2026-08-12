@@ -108,6 +108,16 @@ pub struct Installer {
   /// Plaintext disk encryption password (never written to nix store)
   #[serde(skip)]
   pub encryption_password: Option<String>,
+
+  #[serde(skip)]
+  pub encryption_type: EncryptionType,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EncryptionType {
+  #[default]
+  Luks,
+  ZfsNative,
 }
 
 impl Installer {
@@ -154,10 +164,41 @@ impl Installer {
     format!("{:08x}", hasher.finish() as u32)
   }
 
-  /// Hardware module for the target system
-  /// Hardcoded to Framework 13 AMD AI 300 series for now
   fn detect_hardware() -> Option<String> {
-    Some("framework-amd-ai-300-series".into())
+    let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+      .unwrap_or_default();
+    let product = product.trim().to_string();
+
+    if !product.contains("Framework") {
+      return None;
+    }
+
+    // Read PCI device list to identify GPU — more reliable than parsing CPU model strings
+    let lspci = std::fs::read_to_string("/proc/bus/pci/devices").unwrap_or_default();
+
+    let size = if product.contains("16") { "16-inch" } else { "13-inch" };
+
+    // Meteor Lake (Core Ultra Series 1): PCI ID 8086:7d55
+    // Lunar Lake (Core Ultra Series 3): PCI ID 8086:6487
+    if lspci.contains("7D55") || lspci.contains("7d55") {
+      Some(format!("framework-{size}-intel-core-ultra-series1"))
+    } else if lspci.contains("6487") {
+      Some(format!("framework-{size}-intel-core-ultra-series3"))
+    } else {
+      let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+      if cpuinfo.contains("AMD") {
+        Some(format!("framework-{size}-7040-amd"))
+      } else {
+        None
+      }
+    }
+  }
+
+  pub fn default_zfs_type(&self) -> String {
+    match self.encryption_type {
+      EncryptionType::Luks => "luks-zfs".into(),
+      EncryptionType::ZfsNative => "zfs".into(),
+    }
   }
 
   pub fn has_all_requirements(&self) -> bool {
@@ -197,14 +238,12 @@ impl Installer {
     });
 
     // drive configuration — collect disko configs from all configured drives
-    let encrypted = self.encryption_password.is_some();
     let disko_cfgs: Vec<serde_json::Value> = self
       .disk_config
       .disks_mut()
       .map(|d| {
         let mut cfg = d.as_disko_cfg();
-        // Add ZFS native encryption options to the zpool if password is set
-        if encrypted {
+        if self.encryption_password.is_some() && self.encryption_type == EncryptionType::ZfsNative {
           if let Some(zpool) = cfg.get_mut("zpool") {
             if let Some(opts) = zpool.get_mut("rootFsOptions") {
               opts["encryption"] = serde_json::json!("aes-256-gcm");
@@ -220,10 +259,12 @@ impl Installer {
     // flake configuration if using flakes
     let flake_path = self.flake_path.clone();
 
+    let uses_zfs_native = self.encryption_type == EncryptionType::ZfsNative;
     let config = serde_json::json!({
       "config": sys_config,
       "disko": disko_cfgs,
       "flake_path": flake_path,
+      "zfs_native_encryption": uses_zfs_native,
     });
 
     Ok(config)
@@ -2374,7 +2415,7 @@ impl DiskEncryption {
       styled_block(vec![
         vec![(
           None,
-          "Your ZFS pool will be encrypted with native ZFS encryption (aes-256-gcm).",
+          "Your ZFS pool will be encrypted with LUKS.",
         )],
         vec![(
           None,
@@ -2436,7 +2477,7 @@ impl Page for DiskEncryption {
       styled_block(vec![
         vec![(
           None,
-          "Your ZFS pool will be encrypted with native ZFS encryption (aes-256-gcm).",
+          "Your ZFS pool will be encrypted with LUKS.",
         )],
         vec![(
           None,
@@ -4881,15 +4922,19 @@ impl<'a> InstallProgress<'a> {
 			command!("sh", "-c", format!("echo Partitioning disks... &> {log_file_path}")),
 			command!("sh", "-c", format!("disko --yes-wipe-all-disks --mode destroy,format,mount {disk_cfg_path} &>> {log_file_path}")),
 			].into()));
-    // After disko runs, delete the key file and switch keylocation to prompt for boot
+    // After disko runs, delete the key file and clean up encryption references
     if has_encryption {
+      let mut key_cleanup_cmds = vec![
+        command!("sh", "-c", format!("echo Removing temporary key file... &> {log_file_path}")),
+        command!("sh", "-c", format!("rm -f /tmp/disk.key && echo Key file removed. &>> {log_file_path}")),
+      ];
+      if installer.encryption_type == EncryptionType::ZfsNative {
+        key_cleanup_cmds.push(
+          command!("sh", "-c", format!("zfs set keylocation=prompt tank &>> {log_file_path}")),
+        );
+      }
       steps.push(
-			(Line::from("Securing encryption key..."),
-			vec![
-			command!("sh", "-c", format!("echo Removing temporary key file... &> {log_file_path}")),
-			command!("sh", "-c", format!("rm -f /tmp/disk.key && echo Key file removed. &>> {log_file_path}")),
-			command!("sh", "-c", format!("zfs set keylocation=prompt tank &>> {log_file_path}")),
-			].into()));
+        (Line::from("Securing encryption key..."), key_cleanup_cmds.into()));
     }
 
     steps.push(
@@ -4905,7 +4950,7 @@ impl<'a> InstallProgress<'a> {
 			command!("sh", "-c", format!("cp -v {system_cfg_path} /mnt/etc/nixos/configuration.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {extras_cfg_path} /mnt/etc/nixos/extras.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {disk_cfg_path} /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
-			command!("sh", "-c", format!("sed -i 's|file:///tmp/disk.key|prompt|g' /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
+			command!("sh", "-c", format!("sed -i -e 's|file:///tmp/disk.key|prompt|g' -e '/passwordFile/d' /mnt/etc/nixos/disko.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {flake_nix_path} /mnt/etc/nixos/flake.nix &>> {log_file_path}")),
 			command!("sh", "-c", format!("cp -v {flake_lock_path} /mnt/etc/nixos/flake.lock &>> {log_file_path}")),
 			].into()));

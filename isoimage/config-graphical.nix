@@ -4,90 +4,57 @@
     ./config-common.nix
   ];
 
-  boot.kernelPackages = lib.mkForce pkgs.zfs.latestCompatibleLinuxPackages;
+  boot.kernelPackages = lib.mkForce pkgs.linuxPackages;
 
-  # Trim ISO size — exclude GNOME apps not needed for the installer
   environment.gnome.excludePackages = with pkgs; [
-    gnome-tour
-    orca
-    gnome-maps
-    gnome-music
-    gnome-weather
-    gnome-contacts
-    gnome-calendar
-    gnome-clocks
-    gnome-characters
-    gnome-font-viewer
-    gnome-connections
-    gnome-logs
-    epiphany
-    totem
-    yelp
-    evince
-    geary
-    cheese
-    simple-scan
-    snapshot
-    baobab
+    gnome-tour orca gnome-maps gnome-music gnome-weather
+    gnome-contacts gnome-calendar gnome-clocks gnome-characters
+    gnome-font-viewer gnome-connections gnome-logs
+    epiphany totem yelp evince geary cheese
+    simple-scan snapshot baobab
   ];
 
-  # Better compression to fit under 2GB GitHub release limit
   isoImage.squashfsCompression = "xz -Xdict-size 100%";
-
-  # Disable docs to save ~800MB (ghc-doc, gnome-user-docs, man pages)
   documentation.enable = lib.mkForce false;
-
-  # Disable TTS/speech to save ~300MB (mbrola-voices, flite, speechd)
   services.speechd.enable = lib.mkForce false;
-
+  services.samba.enable = lib.mkForce false;
   hardware.wirelessRegulatoryDatabase = true;
-  # x86_64: trim firmware for the Framework 13 lineup
-  # AMD: amdgpu, amd (microcode), MediaTek WiFi+BT
-  # Intel Core Ultra 1 (Meteor Lake): i915 (Arc Graphics), intel (VPU, BT), iwlwifi (AX210)
-  # (aarch64 falls back to the default redistributable set)
-  hardware.enableRedistributableFirmware = lib.mkIf pkgs.stdenv.hostPlatform.isx86_64 (lib.mkForce false);
-  hardware.firmware = lib.mkIf pkgs.stdenv.hostPlatform.isx86_64 (lib.mkForce [
-    (pkgs.runCommandLocal "linux-firmware-framework" {} ''
+  hardware.enableRedistributableFirmware = lib.mkForce false;
+  hardware.firmware = lib.mkForce [
+    (pkgs.runCommandLocal "linux-firmware-trimmed" {} (''
       mkdir -p $out/lib/firmware
-      for dir in amdgpu amd intel i915; do
+    '' + lib.optionalString pkgs.stdenv.hostPlatform.isx86_64 ''
+      # Framework 13 AMD: GPU, microcode, MediaTek WiFi+BT
+      for dir in amdgpu amd; do
         cp -rL ${pkgs.linux-firmware}/lib/firmware/$dir $out/lib/firmware/
       done
-      # iwlwifi ucode files are at the top level
-      cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
-      # MediaTek WiFi+BT — Framework 13 AMD (RZ616/MT7922, RZ717/MT7925)
       mkdir -p $out/lib/firmware/mediatek
       cp -L ${pkgs.linux-firmware}/lib/firmware/mediatek/*MT7922* $out/lib/firmware/mediatek/
       cp -rL ${pkgs.linux-firmware}/lib/firmware/mediatek/mt792? $out/lib/firmware/mediatek/
-    '')
+      # Framework 13 Intel Core Ultra 1 (Meteor Lake): Arc Graphics, VPU, BT, AX210 WiFi
+      cp -rL ${pkgs.linux-firmware}/lib/firmware/i915 $out/lib/firmware/
+      cp -rL ${pkgs.linux-firmware}/lib/firmware/intel $out/lib/firmware/
+      cp -L ${pkgs.linux-firmware}/lib/firmware/iwlwifi-* $out/lib/firmware/
+    '' + lib.optionalString pkgs.stdenv.hostPlatform.isAarch64 ''
+      # Raspberry Pi 4B: Broadcom WiFi+BT
+      mkdir -p $out/lib/firmware/brcm
+      cp -L ${pkgs.linux-firmware}/lib/firmware/brcm/brcmfmac43455* $out/lib/firmware/brcm/
+    ''))
     pkgs.sof-firmware
-  ]);
-
-  # Disable Samba file sharing
-  services.samba.enable = lib.mkForce false;
+  ];
 
   environment.systemPackages = [ pkgs.gnome-terminal ];
 
-  # Disable GNOME background services that cause heavy I/O on login
-  services.gnome.tracker-miners.enable = false;
-  services.gnome.tracker.enable = false;
+  services.gnome.localsearch.enable = false;
+  services.gnome.tinysparql.enable = false;
   services.gnome.gnome-online-accounts.enable = false;
   services.gnome.evolution-data-server.enable = lib.mkForce false;
-  services.gnome.gnome-software.enable = false;
 
-  # Force dark theme for GNOME Terminal
   programs.dconf.profiles.user.databases = [{
-    settings."org/gnome/terminal/legacy/profiles:/:b1dcc9dd-5262-4d8d-a863-c897e6d979b9" = {
-      use-theme-colors = true;
-    };
-    settings."org/gnome/desktop/interface" = {
-      color-scheme = "prefer-dark";
-    };
-    settings."org/gnome/shell" = {
-      welcome-dialog-last-shown-version = "999.0";
-    };
+    settings."org/gnome/desktop/interface".color-scheme = "prefer-dark";
+    settings."org/gnome/shell".welcome-dialog-last-shown-version = "999.0";
   }];
 
-  # Auto-launch nixos-wizard in a terminal on GNOME login
   environment.etc."xdg/autostart/nixos-wizard.desktop".text = ''
     [Desktop Entry]
     Type=Application

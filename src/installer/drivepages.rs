@@ -476,8 +476,9 @@ impl Page for SelectDrive {
 
               installer.editing_drive = Some(editing);
               if installer.use_auto_disk_config {
+                let zfs_type = installer.default_zfs_type();
                 if let Some(config) = installer.editing_drive.as_mut() {
-                  config.use_default_layout(None);
+                  config.use_default_layout(Some(zfs_type));
                 }
                 Signal::Wait
               } else {
