@@ -468,6 +468,7 @@ impl NixWriter {
         "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
         "boot.zfs.extraPools" = r#"[ "tank" ]"#;
         "boot.zfs.forceImportAll" = true;
+        "boot.zfs.forceImportRoot" = true;
         "boot.zfs.requestEncryptionCredentials" = r#"[ "tank" ]"#;
       }
     } else {
@@ -475,6 +476,7 @@ impl NixWriter {
         "boot.supportedFilesystems" = r#"[ "zfs" ]"#;
         "boot.zfs.extraPools" = r#"[ "tank" ]"#;
         "boot.zfs.forceImportAll" = true;
+        "boot.zfs.forceImportRoot" = true;
       }
     };
 
